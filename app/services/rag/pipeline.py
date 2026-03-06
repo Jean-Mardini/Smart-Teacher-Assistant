@@ -151,7 +151,9 @@ class RAGPipeline:
 
         query_emb = self.embeddings.embed_text(question)
         retrieved_chunks: List[RetrievedChunk] = self.retriever.retrieve(
-            query_emb, top_k=top_k
+            query_emb,
+            top_k=top_k,
+            min_score=0.35,
         )
 
         if not retrieved_chunks:

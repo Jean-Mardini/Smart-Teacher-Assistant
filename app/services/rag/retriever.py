@@ -31,7 +31,12 @@ class Retriever:
     def __init__(self, store: VectorStore) -> None:
         self._store = store
 
-    def retrieve(self, query_embedding: np.ndarray, top_k: int = 3) -> List[RetrievedChunk]:
+    def retrieve(
+        self,
+        query_embedding: np.ndarray,
+        top_k: int = 3,
+        min_score: float | None = None,
+    ) -> List[RetrievedChunk]:
         """
         Retrieve the most relevant chunks for a given query embedding.
 
@@ -46,9 +51,13 @@ class Retriever:
 
         chunks: List[RetrievedChunk] = []
         for r in raw_results:
+            score = float(r.get("score", 0.0))
+            if min_score is not None and score < min_score:
+                continue
+
             chunks.append(
                 RetrievedChunk(
-                    score=float(r.get("score", 0.0)),
+                    score=score,
                     document_id=str(r.get("document_id", "")),
                     section_id=str(r.get("section_id", "")),
                     section_heading=str(r.get("section_heading", "")),
