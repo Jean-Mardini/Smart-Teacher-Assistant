@@ -4,3 +4,6 @@ pdfplumber
 chromadb
 openai
 python-dotenv
+sentence-transformers
+requests
+tiktoken
