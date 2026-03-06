@@ -5,5 +5,9 @@ chromadb
 openai
 python-dotenv
 sentence-transformers
+transformers
+torch
+faiss-cpu
+numpy
 requests
 tiktoken
