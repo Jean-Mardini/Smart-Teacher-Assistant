@@ -1,4 +1,3 @@
-<<<<<<< HEAD
 from fastapi import APIRouter
 from pydantic import BaseModel
 
@@ -20,31 +19,21 @@ from app.services.agents.chat_agent import run_chat
 
 # ----------- RAG (MARK) -----------
 from app.services.knowledge.retrieval import Retriever
-=======
-"""Routers exposing the different agents (summarizer, quiz, slides, etc.).
 
-Currently empty – each agent will be wired here later.
-"""
-
-from fastapi import APIRouter
->>>>>>> origin/main
-
+retriever = None
+try:
+    retriever = Retriever()
+except Exception:
+    pass
 
 router = APIRouter()
 
 
-<<<<<<< HEAD
 # ---------------------------
 # CHAT REQUEST MODEL
 # ---------------------------
 class ChatRequest(BaseModel):
     question: str
-
-
-# ---------------------------
-# INIT RETRIEVER (Mark's part)
-# ---------------------------
-retriever = Retriever()   # ⚠️ If error → adjust based on Mark
 
 
 # ---------------------------
@@ -54,13 +43,11 @@ async def get_document(doc_id: str):
     return {
         "document_id": "sample_pdf_001",
         "title": "AI Teacher Assistant",
-
         "metadata": {
             "filename": "sample.pdf",
             "filetype": "pdf",
             "total_pages": 3
         },
-
         "sections": [
             {
                 "section_id": "sec_1",
@@ -79,7 +66,6 @@ async def get_document(doc_id: str):
                 "text": "The system processes documents and generates summaries, slides and quizzes."
             }
         ],
-
         "tables": [],
         "images": []
     }
@@ -90,9 +76,7 @@ async def get_document(doc_id: str):
 # ---------------------------
 @router.post("/agents/summarize", response_model=SummaryResult)
 async def summarize(req: SummaryRequest):
-
     doc = await get_document(req.document_id)
-
     return await run_summarizer(doc, length=req.length)
 
 
@@ -101,9 +85,7 @@ async def summarize(req: SummaryRequest):
 # ---------------------------
 @router.post("/agents/slides", response_model=SlideDeckResult)
 async def slides(req: SlideRequest):
-
     doc = await get_document(req.document_id)
-
     return await run_slides(doc, n_slides=req.n_slides)
 
 
@@ -112,9 +94,7 @@ async def slides(req: SlideRequest):
 # ---------------------------
 @router.post("/agents/quiz", response_model=QuizResult)
 async def quiz(req: QuizRequest):
-
     doc = await get_document(req.document_id)
-
     return await run_quiz(doc, difficulty=req.difficulty)
 
 
@@ -124,11 +104,13 @@ async def quiz(req: QuizRequest):
 @router.post("/agents/chat")
 async def chat(req: ChatRequest):
 
+    # if Mark's RAG not ready → safe fallback
+    if retriever is None:
+        return {"message": "RAG not ready yet"}
+
     result = await run_chat(
         question=req.question,
         retriever=retriever
     )
 
     return result
-=======
->>>>>>> origin/main
