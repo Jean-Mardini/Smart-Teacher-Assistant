@@ -1,5 +1,4 @@
 from fastapi import APIRouter
-from pydantic import BaseModel
 
 # ----------- MODELS -----------
 from app.models.agents import (
@@ -15,25 +14,8 @@ from app.models.agents import (
 from app.services.agents.summarizer_agent import run_summarizer
 from app.services.agents.slide_agent import run_slides
 from app.services.agents.quiz_agent import run_quiz
-from app.services.agents.chat_agent import run_chat
-
-# ----------- RAG (MARK) -----------
-from app.services.knowledge.retrieval import Retriever
-
-retriever = None
-try:
-    retriever = Retriever()
-except Exception:
-    pass
 
 router = APIRouter()
-
-
-# ---------------------------
-# CHAT REQUEST MODEL
-# ---------------------------
-class ChatRequest(BaseModel):
-    question: str
 
 
 # ---------------------------
@@ -41,7 +23,7 @@ class ChatRequest(BaseModel):
 # ---------------------------
 async def get_document(doc_id: str):
     return {
-        "document_id": "sample_pdf_001",
+        "document_id": doc_id,
         "title": "AI Teacher Assistant",
         "metadata": {
             "filename": "sample.pdf",
@@ -95,22 +77,8 @@ async def slides(req: SlideRequest):
 @router.post("/agents/quiz", response_model=QuizResult)
 async def quiz(req: QuizRequest):
     doc = await get_document(req.document_id)
-    return await run_quiz(doc, difficulty=req.difficulty)
-
-
-# ---------------------------
-# CHAT (RAG)
-# ---------------------------
-@router.post("/agents/chat")
-async def chat(req: ChatRequest):
-
-    # if Mark's RAG not ready → safe fallback
-    if retriever is None:
-        return {"message": "RAG not ready yet"}
-
-    result = await run_chat(
-        question=req.question,
-        retriever=retriever
+    return await run_quiz(
+        doc,
+        n_questions=req.n_questions,
+        difficulty=req.difficulty
     )
-
-    return result

@@ -4,7 +4,7 @@ Each agent (summarizer, quiz, slides, rubric, grading, chat, cross-doc)
 will have request/response models defined here.
 """
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import List, Optional, Literal
 
 
@@ -45,9 +45,9 @@ class DocumentIn(BaseModel):
     document_id: str
     title: str
     metadata: Metadata
-    sections: List[Section] = []
-    tables: List[Table] = []
-    images: List[Image] = []
+    sections: List[Section] = Field(default_factory=list)
+    tables: List[Table] = Field(default_factory=list)
+    images: List[Image] = Field(default_factory=list)
 
 
 # ---------------------------
@@ -70,8 +70,8 @@ class GlossaryItem(BaseModel):
 class SummaryResult(BaseModel):
     summary: str
     key_points: List[str]
-    action_items: Optional[List[str]] = []
-    glossary: Optional[List[GlossaryItem]] = []
+    action_items: Optional[List[str]] = Field(default_factory=list)
+    glossary: Optional[List[GlossaryItem]] = Field(default_factory=list)
 
 
 # ---------------------------
@@ -105,12 +105,13 @@ QType = Literal["mcq", "short_answer"]
 class QuizRequest(BaseModel):
     document_id: str
     difficulty: Difficulty = "medium"
+    n_questions: int = 5  # ✅ ADDED
 
 
 class QuizQuestion(BaseModel):
     type: QType
     question: str
-    options: List[str] = []
+    options: List[str] = Field(default_factory=list)
     answer_index: Optional[int] = None
     answer_text: Optional[str] = None
     explanation: str
