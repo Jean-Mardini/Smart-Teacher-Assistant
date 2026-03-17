@@ -1,6 +1,11 @@
 fastapi
 uvicorn
 pdfplumber
+python-docx
+pandas
+python-pptx
+openpyxl
+python-multipart
 chromadb
 openai
 python-dotenv
