@@ -1,3 +1,4 @@
+"""Chat-with-documents agent implementation (owned by Mark and Angela)."""
 from app.services.llm.groq_client import call_llm_json
 from app.services.knowledge.retrieval import Retriever
 
@@ -39,3 +40,6 @@ Return JSON:
     )
 
     return response
+
+
+

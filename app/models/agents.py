@@ -1,3 +1,9 @@
+"""Data models describing inputs and outputs for all agents.
+
+Each agent (summarizer, quiz, slides, rubric, grading, chat, cross-doc)
+will have request/response models defined here.
+"""
+
 from pydantic import BaseModel
 from typing import List, Optional, Literal
 
@@ -50,9 +56,11 @@ class DocumentIn(BaseModel):
 
 SummaryLength = Literal["short", "medium", "long"]
 
+
 class SummaryRequest(BaseModel):
     document_id: str
     length: SummaryLength = "medium"
+
 
 class GlossaryItem(BaseModel):
     term: str
@@ -80,6 +88,7 @@ class SlideDeckResult(BaseModel):
     title: str
     slides: List[Slide]
 
+
 class SlideRequest(BaseModel):
     document_id: str
     n_slides: int = 5
@@ -88,7 +97,6 @@ class SlideRequest(BaseModel):
 # ---------------------------
 # QUIZ MODELS
 # ---------------------------
-
 
 Difficulty = Literal["easy", "medium", "hard"]
 QType = Literal["mcq", "short_answer"]

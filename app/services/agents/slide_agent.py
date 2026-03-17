@@ -1,3 +1,5 @@
+
+"""Slide generator agent implementation (owned by Angela)."""
 from pathlib import Path
 from app.services.llm.groq_client import call_llm_json
 from app.models.agents import SlideDeckResult
@@ -51,3 +53,8 @@ TEXT:
     data = call_llm_json(system, user)
 
     return SlideDeckResult.model_validate(data)
+
+"""Slide generator agent implementation (owned by Angela)."""
+
+
+

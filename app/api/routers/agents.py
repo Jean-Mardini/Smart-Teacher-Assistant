@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 from fastapi import APIRouter
 from pydantic import BaseModel
 
@@ -19,11 +20,20 @@ from app.services.agents.chat_agent import run_chat
 
 # ----------- RAG (MARK) -----------
 from app.services.knowledge.retrieval import Retriever
+=======
+"""Routers exposing the different agents (summarizer, quiz, slides, etc.).
+
+Currently empty – each agent will be wired here later.
+"""
+
+from fastapi import APIRouter
+>>>>>>> origin/main
 
 
 router = APIRouter()
 
 
+<<<<<<< HEAD
 # ---------------------------
 # CHAT REQUEST MODEL
 # ---------------------------
@@ -120,3 +130,5 @@ async def chat(req: ChatRequest):
     )
 
     return result
+=======
+>>>>>>> origin/main
