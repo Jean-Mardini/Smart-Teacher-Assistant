@@ -1,11 +1,14 @@
 import os
 import json
 import re
-from groq import Groq
-from dotenv import load_dotenv
 
-# Load .env file
-load_dotenv()
+try:
+    from dotenv import load_dotenv
+except ModuleNotFoundError:
+    load_dotenv = None
+
+if load_dotenv is not None:
+    load_dotenv()
 
 API_KEY = os.getenv("GROQ_API_KEY")
 MODEL = os.getenv("GROQ_MODEL", "llama-3.1-8b-instant")
@@ -13,7 +16,16 @@ MODEL = os.getenv("GROQ_MODEL", "llama-3.1-8b-instant")
 if not API_KEY:
     print("WARNING: GROQ_API_KEY not found")
 
-client = Groq(api_key=API_KEY)
+
+def _get_client():
+    try:
+        from groq import Groq
+    except ModuleNotFoundError as e:
+        raise RuntimeError(
+            "The 'groq' package is not installed. Install dependencies before using LLM endpoints."
+        ) from e
+
+    return Groq(api_key=API_KEY)
 
 
 def _extract_json(text: str) -> str:
@@ -24,6 +36,8 @@ def _extract_json(text: str) -> str:
 
 
 def _chat(system: str, user: str) -> str:
+    client = _get_client()
+
     response = client.chat.completions.create(
         model=MODEL,
         temperature=0.2,

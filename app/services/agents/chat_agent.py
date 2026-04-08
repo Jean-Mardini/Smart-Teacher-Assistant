@@ -1,13 +1,11 @@
 """Chat-with-documents agent implementation (owned by Mark and Angela)."""
 
-from app.services.llm.groq_client import call_llm_json
-from app.services.knowledge.retrieval import Retriever
+from typing import Any
 
 
-async def run_chat(question: str, retriever: Retriever):
-
+async def run_chat(question: str, retriever: Any):
     # ---------------------------
-    # STEP 1 — Retrieve chunks
+    # STEP 1 - Retrieve chunks
     # ---------------------------
     chunks = retriever.retrieve(question, top_k=3)
 
@@ -15,7 +13,7 @@ async def run_chat(question: str, retriever: Retriever):
         return {"answer": "Not found in document"}
 
     # ---------------------------
-    # STEP 2 — Build context
+    # STEP 2 - Build context
     # ---------------------------
     context_chunks = [
         getattr(c, "chunk_text", "") for c in chunks
@@ -24,7 +22,7 @@ async def run_chat(question: str, retriever: Retriever):
     context = "\n\n".join(context_chunks)
 
     # ---------------------------
-    # STEP 3 — Prompt
+    # STEP 3 - Prompt
     # ---------------------------
     system_prompt = """
 You are an AI teaching assistant.
@@ -46,16 +44,17 @@ Return JSON:
 """
 
     # ---------------------------
-    # STEP 4 — Call LLM
+    # STEP 4 - Call LLM
     # ---------------------------
     try:
-        response = await call_llm_json(
+        from app.services.llm.groq_client import call_llm_json
+
+        response = call_llm_json(
             system=system_prompt,
-            user=user_prompt
+            user=user_prompt,
         )
 
-        # Safety: ensure correct format
-        if "answer" not in response:
+        if not isinstance(response, dict) or "answer" not in response:
             return {"answer": "Error: invalid response format"}
 
         return response

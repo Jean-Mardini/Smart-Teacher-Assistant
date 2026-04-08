@@ -1,5 +1,5 @@
 from fastapi import FastAPI
-from app.api.routers import agents
+from app.api.routers import agents, chat
 
 app = FastAPI(
     title="Smart Teacher Assistant",
@@ -15,3 +15,4 @@ async def health():
     return {"status": "ok"}
 
 app.include_router(agents.router)
+app.include_router(chat.router)

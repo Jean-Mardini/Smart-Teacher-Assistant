@@ -1,33 +1,34 @@
-"""Routers for chat-with-documents endpoints.
+"""Routers for chat-with-documents endpoints."""
 
-Currently empty – Mark, Angela, and Jean will add endpoints later.
-"""
+from importlib import import_module
+from typing import Any
 
 from fastapi import APIRouter
 from pydantic import BaseModel
 
-# ----------- AGENT -----------
 from app.services.agents.chat_agent import run_chat
-
-# ----------- RAG (MARK) -----------
-from app.services.knowledge.retrieval import Retriever
 
 router = APIRouter()
 
 
-# ---------------------------
-# INIT RETRIEVER
-# ---------------------------
-retriever = None
-try:
-    retriever = Retriever()
-except Exception as e:
-    print("Retriever init failed:", e)
+def _init_retriever() -> Any:
+    try:
+        retrieval_module = import_module("app.services.knowledge.retrieval")
+        retriever_cls = getattr(retrieval_module, "Retriever", None)
+
+        if retriever_cls is None:
+            print("Retriever init skipped: Retriever class is not available.")
+            return None
+
+        return retriever_cls()
+    except Exception as e:
+        print("Retriever init failed:", e)
+        return None
 
 
-# ---------------------------
-# MODELS
-# ---------------------------
+retriever = _init_retriever()
+
+
 class ChatRequest(BaseModel):
     question: str
 
@@ -36,18 +37,12 @@ class ChatResponse(BaseModel):
     answer: str
 
 
-# ---------------------------
-# CHAT ENDPOINT
-# ---------------------------
 @router.post("/chat", response_model=ChatResponse)
 async def chat(req: ChatRequest):
-
     if retriever is None:
         return {"answer": "RAG not ready yet"}
 
-    result = await run_chat(
+    return await run_chat(
         question=req.question,
-        retriever=retriever
+        retriever=retriever,
     )
-
-    return result
