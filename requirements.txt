@@ -4,3 +4,13 @@ pdfplumber
 chromadb
 openai
 python-dotenv
+beautifulsoup4
+openpyxl
+pymupdf
+python-docx
+python-pptx
+pytesseract
+Pillow
+langdetect
+arabic-reshaper
+python-bidi
