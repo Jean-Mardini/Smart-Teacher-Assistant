@@ -1,73 +1,95 @@
-"""Word (.docx) specific parsing logic."""
-
-from __future__ import annotations
-
-from pathlib import Path
-from zipfile import ZipFile
-
-from app.models.documents import DocumentMetadata, Image, ParsedDocument, Section
-from app.services.document_processing.image_assets import save_image_bytes
-from app.services.document_processing.image_analysis import analyze_image_bytes
+from docx import Document
+from .cleaners import clean_text
+from .tables import extract_docx_tables
+import os
 
 
-def parse_docx(path: str | Path) -> ParsedDocument:
-    file_path = Path(path)
+# Style names that python-docx uses for headings
+_HEADING_STYLES = {
+    'heading 1', 'heading 2', 'heading 3',
+    'title', 'subtitle',
+    # French variants
+    'titre', 'sous-titre',
+}
 
-    try:
-        from docx import Document
-    except ModuleNotFoundError as exc:
-        raise RuntimeError("python-docx is required to parse DOCX files.") from exc
+_APPROX_CHARS_PER_PAGE = 3000
 
-    document = Document(file_path)
-    paragraphs = [paragraph.text.strip() for paragraph in document.paragraphs if paragraph.text.strip()]
-    full_text = "\n\n".join(paragraphs)
-    images: list[Image] = []
 
-    try:
-        with ZipFile(file_path) as archive:
-            media_files = sorted(
-                name for name in archive.namelist()
-                if name.startswith("word/media/")
-            )
-            for index, media_name in enumerate(media_files, start=1):
-                image_bytes = archive.read(media_name)
-                ocr_text = analyze_image_bytes(image_bytes)
-                asset_path = save_image_bytes(
-                    file_path,
-                    f"docx_image_{index}",
-                    image_bytes,
-                    suffix=Path(media_name).suffix or ".bin",
-                )
-                images.append(
-                    Image(
-                        image_id=f"docx_image_{index}",
-                        page=1,
-                        caption=f"Embedded image {index}",
-                        description=ocr_text,
-                        asset_path=asset_path,
-                    )
-                )
-    except Exception:
-        images = []
+def extract_docx_text(filepath: str, document_id: str = "doc"):
+    """
+    Extract text, tables, and images from a DOCX file.
 
-    return ParsedDocument(
-        document_id=file_path.stem.lower().replace(" ", "_"),
-        title=file_path.stem,
-        metadata=DocumentMetadata(
-            filename=file_path.name,
-            filetype="docx",
-            source_path=str(file_path),
-            total_pages=1,
-        ),
-        sections=[
-            Section(
-                section_id="section_1",
-                heading="Document",
-                level=1,
-                page_start=1,
-                page_end=1,
-                text=full_text,
-            )
-        ],
-        images=images,
-    )
+    Returns:
+        pages:     list of {"page": N, "text": "..."} — approximate page groupings
+        full_text: complete cleaned document text
+        tables:    list of extracted table dicts
+        images:    list of image dicts with path (no binary)
+    """
+
+    doc = Document(filepath)
+
+    full_text = ""
+    page_number = 1
+    page_buffer = ""
+    pages = []
+
+    for para in doc.paragraphs:
+
+        style_name = (para.style.name or "").lower()
+        raw = para.text.strip()
+
+        if not raw:
+            continue
+
+        # Uppercase Heading 1 / Title so structure_extraction's ALL CAPS rule fires
+        if 'heading 1' in style_name or style_name == 'title':
+            line = raw.upper()
+        else:
+            line = raw
+
+        cleaned = clean_text(line)
+        full_text += cleaned + "\n"
+        page_buffer += cleaned + "\n"
+
+        if len(page_buffer) >= _APPROX_CHARS_PER_PAGE:
+            pages.append({"page": page_number, "text": page_buffer.strip()})
+            page_buffer = ""
+            page_number += 1
+
+    if page_buffer.strip():
+        pages.append({"page": page_number, "text": page_buffer.strip()})
+
+    tables = extract_docx_tables(doc)
+
+    # Images
+    images = []
+    image_counter = 0
+    img_dir = os.path.join("outputs", "images", document_id)
+
+    for shape in doc.inline_shapes:
+        try:
+            pic = shape._inline.graphic.graphicData.pic
+            r_id = pic.blipFill.blip.embed
+            image_part = doc.part.related_parts[r_id]
+
+            image_counter += 1
+            img_id = f"img_{image_counter}"
+            os.makedirs(img_dir, exist_ok=True)
+            img_path = os.path.join(img_dir, f"{img_id}.png")
+            with open(img_path, "wb") as f:
+                f.write(image_part.blob)
+
+            # Alt text: prefer descr, fall back to name
+            doc_pr = shape._inline.docPr
+            caption = doc_pr.get("descr") or doc_pr.get("name") or ""
+
+            images.append({
+                "image_id": img_id,
+                "page": page_number,
+                "caption": caption,
+                "path": img_path,
+            })
+        except Exception:
+            continue
+
+    return pages, full_text, tables, images

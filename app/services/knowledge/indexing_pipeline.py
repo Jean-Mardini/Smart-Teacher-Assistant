@@ -21,27 +21,42 @@ def _slugify(value: str) -> str:
 
 
 def _build_text_document(path: Path, title: str, text: str) -> ParsedDocument:
+    body = (text or "").strip()
     return ParsedDocument(
         document_id=_slugify(path.stem),
         title=title,
         metadata=DocumentMetadata(
             filename=path.name,
             filetype=path.suffix.lstrip(".").lower() or "txt",
+            total_pages=1,
             source_path=str(path),
+            text_extracted=bool(body),
         ),
         sections=[
             Section(
                 section_id="section_1",
                 heading="Content",
-                text=(text or "").strip(),
+                level=1,
+                page_start=1,
+                page_end=1,
+                text=body,
             )
         ],
+        tables=[],
+        images=[],
+        full_text=body,
     )
 
 
 def _load_structured_json(path: Path) -> ParsedDocument:
     payload = json.loads(path.read_text(encoding="utf-8"))
     if "document_id" in payload and "sections" in payload:
+        if not payload.get("full_text"):
+            secs = payload.get("sections") or []
+            payload["full_text"] = "\n\n".join(
+                (s.get("text") or "") if isinstance(s, dict) else getattr(s, "text", "")
+                for s in secs
+            ).strip()
         return ParsedDocument(**payload)
 
     title = payload.get("title") or path.stem

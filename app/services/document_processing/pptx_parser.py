@@ -1,85 +1,88 @@
-"""PowerPoint (.pptx) specific parsing logic."""
-
-from __future__ import annotations
-
-from pathlib import Path
-
-from app.models.documents import DocumentMetadata, Image, ParsedDocument, Section
-from app.services.document_processing.image_assets import save_image_bytes
-from app.services.document_processing.image_analysis import analyze_image_bytes
+from pptx import Presentation
+from pptx.enum.shapes import PP_PLACEHOLDER
+from .cleaners import clean_text
+from .tables import extract_pptx_tables
+from typing import List, Dict, Any
+import os
 
 
-def parse_pptx(path: str | Path) -> ParsedDocument:
-    file_path = Path(path)
+def extract_pptx_text(filepath: str, document_id: str = "doc"):
+    """
+    Extract text, tables, and speaker notes from a PPTX file.
 
-    try:
-        from pptx import Presentation
-    except ModuleNotFoundError as exc:
-        raise RuntimeError("python-pptx is required to parse PPTX files.") from exc
+    Returns:
+        pages:  list of {"page": N, "text": "..."}
+        full_text: complete cleaned text
+        tables: list of table dicts
+        images: list of image dicts with path (no binary)
+    """
 
-    presentation = Presentation(file_path)
-    sections: list[Section] = []
-    images: list[Image] = []
+    prs = Presentation(filepath)
 
-    for slide_index, slide in enumerate(presentation.slides, start=1):
-        texts: list[str] = []
-        slide_title = f"Slide {slide_index}"
+    pages = []
+    full_text = ""
+    images = []
+    image_counter = 0
+
+    for slide_number, slide in enumerate(prs.slides, start=1):
+        slide_lines = []
+
+        # Resolve slide title for image captions
+        slide_title = ""
         for shape in slide.shapes:
-            if hasattr(shape, "text") and shape.text:
-                clean_text = shape.text.strip()
-                if clean_text:
-                    texts.append(clean_text)
-                    if slide_title == f"Slide {slide_index}":
-                        slide_title = clean_text
+            try:
+                if shape.is_placeholder and shape.placeholder_format.idx in (0, 1):
+                    slide_title = shape.text_frame.text.strip()
+                    break
+            except Exception:
+                pass
 
-            if getattr(shape, "shape_type", None) == 13 and hasattr(shape, "image"):
-                ocr_text = analyze_image_bytes(shape.image.blob)
-                image_number = len(images) + 1
-                asset_path = save_image_bytes(
-                    file_path,
-                    f"slide_{slide_index}_image_{image_number}",
-                    shape.image.blob,
-                    suffix=f".{getattr(shape.image, 'ext', 'bin')}",
-                )
-                images.append(
-                    Image(
-                        image_id=f"slide_{slide_index}_image_{image_number}",
-                        page=slide_index,
-                        caption=slide_title,
-                        description=ocr_text,
-                        asset_path=asset_path,
-                    )
-                )
+        for shape in slide.shapes:
 
-        if not texts:
-            if not any(image.page == slide_index for image in images):
-                continue
-            title = slide_title
-            body_text = ""
-        else:
-            title = texts[0]
-            body_text = "\n".join(texts)
+            # Text frames (titles, text boxes, content)
+            if shape.has_text_frame:
+                for para in shape.text_frame.paragraphs:
+                    para_text = para.text.strip()
+                    if not para_text:
+                        continue
 
-        sections.append(
-            Section(
-                section_id=f"slide_{slide_index}",
-                heading=title,
-                level=1,
-                page_start=slide_index,
-                page_end=slide_index,
-                text=body_text,
-            )
-        )
+                    # Treat title placeholder as a heading
+                    try:
+                        if shape.is_placeholder and shape.placeholder_format.idx in (0, 1):
+                            # idx 0 = title, idx 1 = center title
+                            slide_lines.append(para_text.upper())
+                        else:
+                            slide_lines.append(para_text)
+                    except Exception:
+                        slide_lines.append(para_text)
 
-    return ParsedDocument(
-        document_id=file_path.stem.lower().replace(" ", "_"),
-        title=file_path.stem,
-        metadata=DocumentMetadata(
-            filename=file_path.name,
-            filetype="pptx",
-            source_path=str(file_path),
-            total_pages=len(presentation.slides),
-        ),
-        sections=sections,
-        images=images,
-    )
+            # Images (shape_type 13 == PICTURE)
+            if shape.shape_type == 13:
+                image_counter += 1
+                img_id = f"img_{image_counter}"
+                img_dir = os.path.join("outputs", "images", document_id)
+                os.makedirs(img_dir, exist_ok=True)
+                img_path = os.path.join(img_dir, f"{img_id}.png")
+                with open(img_path, "wb") as f:
+                    f.write(shape.image.blob)
+                caption = slide_title if slide_title else shape.name
+                images.append({
+                    "image_id": img_id,
+                    "page": slide_number,
+                    "caption": caption,
+                    "path": img_path,
+                })
+
+        # Speaker notes
+        if slide.has_notes_slide:
+            notes_text = slide.notes_slide.notes_text_frame.text.strip()
+            if notes_text:
+                slide_lines.append(f"[Notes: {notes_text}]")
+
+        cleaned = clean_text("\n".join(slide_lines))
+        pages.append({"page": slide_number, "text": cleaned})
+        full_text += cleaned + "\n"
+
+    tables = extract_pptx_tables(prs)
+
+    return pages, full_text, tables, images

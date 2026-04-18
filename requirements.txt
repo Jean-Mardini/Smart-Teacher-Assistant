@@ -12,3 +12,9 @@ openai
 python-dotenv
 pytesseract
 groq
+beautifulsoup4
+pymupdf
+Pillow
+langdetect
+arabic-reshaper
+python-bidi

@@ -1,4 +1,4 @@
-"""Data models for uploaded and parsed documents."""
+"""Data models for uploaded and parsed documents (Matheos pipeline + API helpers)."""
 
 from __future__ import annotations
 
@@ -7,36 +7,38 @@ from typing import Any, Dict, List, Optional
 from pydantic import BaseModel, Field
 
 
-class DocumentMetadata(BaseModel):
-    filename: str
-    filetype: str
-    source_path: Optional[str] = None
-    total_pages: int = 1
-    extra: Dict[str, Any] = Field(default_factory=dict)
-
-
 class Section(BaseModel):
     section_id: str
     heading: str = ""
     level: int = 1
     page_start: int = 1
-    page_end: int = 1
-    text: str
+    page_end: Optional[int] = None
+    text: str = ""
 
 
 class Table(BaseModel):
     table_id: str
     page: int = 1
-    caption: Optional[str] = None
-    text: str
+    caption: str = ""
+    text: str = ""
 
 
 class Image(BaseModel):
     image_id: str
     page: int = 1
-    caption: Optional[str] = None
-    description: Optional[str] = None
-    asset_path: Optional[str] = None
+    caption: str = ""
+    path: str = ""
+
+
+class DocumentMetadata(BaseModel):
+    filename: str
+    filetype: str
+    total_pages: int = 1
+    language: Optional[str] = "en"
+    ocr_attempted: bool = False
+    text_extracted: bool = True
+    source_path: Optional[str] = None
+    extra: Dict[str, Any] = Field(default_factory=dict)
 
 
 class ParsedDocument(BaseModel):
@@ -46,6 +48,7 @@ class ParsedDocument(BaseModel):
     sections: List[Section] = Field(default_factory=list)
     tables: List[Table] = Field(default_factory=list)
     images: List[Image] = Field(default_factory=list)
+    full_text: str = ""
 
 
 class LocalDocumentInfo(BaseModel):
