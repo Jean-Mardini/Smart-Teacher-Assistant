@@ -1,6 +1,6 @@
 # Smart Teacher Assistant
 
-USJ capstone — FastAPI backend for document ingestion (PDF, DOCX, PPTX), structured extraction, RAG, content agents (summaries, slides, quizzes), chat, and (in progress) evaluation.
+USJ capstone — FastAPI backend for document ingestion (PDF, DOCX, PPTX), structured extraction, RAG, LangGraph orchestration, content agents (summaries, slides, quizzes), chat, and evaluation (rubrics + grading).
 
 **Branches:** use **`dev`** for daily work; merge **`dev` → `main`** for submission releases.
 
