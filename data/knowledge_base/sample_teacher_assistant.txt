@@ -1,0 +1,7 @@
+Smart Teacher Assistant is an AI-powered backend for education workflows.
+
+The application provides agent endpoints for summarizing documents, creating slide decks, and generating quizzes.
+
+The chat endpoint answers questions using retrieved document context. It should only answer from indexed documents and say "Not found in document" when the answer is missing from the context.
+
+The retrieval flow indexes local files from the knowledge base folder, splits them into chunks, stores embeddings in a local JSON vector store, and returns the most relevant chunks for a user question.

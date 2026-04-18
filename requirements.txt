@@ -1,5 +1,6 @@
 fastapi
 uvicorn
+streamlit
 pdfplumber
 python-docx
 pandas
@@ -9,3 +10,4 @@ python-multipart
 chromadb
 openai
 python-dotenv
+pytesseract

@@ -1,3 +1,5 @@
+"""angelas part"""
+
 import os
 import json
 import re
@@ -35,12 +37,12 @@ def _extract_json(text: str) -> str:
     return match.group(0)
 
 
-def _chat(system: str, user: str) -> str:
+def _chat(system: str, user: str, temperature: float = 0.2) -> str:
     client = _get_client()
 
     response = client.chat.completions.create(
         model=MODEL,
-        temperature=0.2,
+        temperature=temperature,
         messages=[
             {"role": "system", "content": system},
             {"role": "user", "content": user},
@@ -53,8 +55,8 @@ def _chat(system: str, user: str) -> str:
     return response.choices[0].message.content
 
 
-def call_llm_json(system: str, user: str) -> dict:
-    content = _chat(system, user)
+def call_llm_json(system: str, user: str, temperature: float = 0.2) -> dict:
+    content = _chat(system, user, temperature=temperature)
 
     try:
         return json.loads(_extract_json(content))
@@ -66,5 +68,5 @@ def call_llm_json(system: str, user: str) -> dict:
             f"{content}"
         )
 
-        fixed = _chat(repair_system, repair_user)
+        fixed = _chat(repair_system, repair_user, temperature=0.0)
         return json.loads(_extract_json(fixed))

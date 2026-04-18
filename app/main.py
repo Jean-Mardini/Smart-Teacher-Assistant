@@ -1,10 +1,16 @@
+"""angelas part"""
+
 from fastapi import FastAPI
-from app.api.routers import agents, chat
+
+from app.api.routers import agents, chat, documents, rag
+from app.storage.files import ensure_storage_dirs
 
 app = FastAPI(
     title="Smart Teacher Assistant",
     version="1.0.0"
 )
+
+ensure_storage_dirs()
 
 @app.get("/")
 async def root():
@@ -16,3 +22,5 @@ async def health():
 
 app.include_router(agents.router)
 app.include_router(chat.router)
+app.include_router(documents.router)
+app.include_router(rag.router)
