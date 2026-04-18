@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import { DocPicker } from '../components/DocPicker'
 import { apiJson } from '../api/client'
 
 type ChatResponse = {
@@ -10,6 +11,7 @@ type ChatResponse = {
 export function ChatPage() {
   const [question, setQuestion] = useState('')
   const [ids, setIds] = useState('')
+  const [pickId, setPickId] = useState('')
   const [length, setLength] = useState('medium')
   const [result, setResult] = useState<ChatResponse | null>(null)
   const [loading, setLoading] = useState(false)
@@ -46,10 +48,20 @@ export function ChatPage() {
     <>
       <h1 className="page-title">Dialogue</h1>
       <p className="page-sub">
-        Questions grounded in your indexed library. Leave document IDs empty to search across everything, or restrict to
-        comma-separated IDs from the Library.
+        Upload a file below (or use the Library), then run <strong>Rebuild search index</strong> on the Library page so
+        Dialogue can retrieve passages. Optionally limit chat to one document using the picker or comma-separated IDs.
       </p>
-      {error && <div className="error">{error}</div>}
+      {error && <div className="error" style={{ whiteSpace: 'pre-wrap' }}>{error}</div>}
+
+      <DocPicker
+        value={pickId}
+        onChange={(id) => {
+          setPickId(id)
+          setIds(id)
+        }}
+        accept=".pdf,.docx,.pptx,.txt,.md"
+      />
+
       <div className="panel">
         <div className="field">
           <label htmlFor="q">Your question</label>

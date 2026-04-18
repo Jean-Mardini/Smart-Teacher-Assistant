@@ -69,7 +69,7 @@ export function LibraryPage() {
         them.
       </p>
 
-      {error && <div className="error">{error}</div>}
+      {error && <div className="error" style={{ whiteSpace: 'pre-wrap' }}>{error}</div>}
       {message && (
         <div className="panel" style={{ marginBottom: '1rem', background: 'rgba(80,160,120,0.08)', borderColor: 'rgba(80,160,120,0.25)' }}>
           {message}
@@ -102,7 +102,7 @@ export function LibraryPage() {
         )}
         <ul className="doc-list">
           {docs.map((d) => (
-            <li key={d.document_id}>
+            <li key={d.path || `${d.document_id}-${d.title}`}>
               <span>
                 <strong>{d.title}</strong> <code>{d.document_id}</code>
               </span>

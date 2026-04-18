@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 from typing import List
@@ -18,6 +19,13 @@ from app.storage.files import get_knowledge_base_dir, get_vector_store_path
 def _slugify(value: str) -> str:
     clean = "".join(ch.lower() if ch.isalnum() else "_" for ch in value)
     return "_".join(part for part in clean.split("_") if part) or "document"
+
+
+def _unique_document_id(path: Path) -> str:
+    """Stable unique id per file path (avoids every PDF becoming ``doc_1``)."""
+    stem = _slugify(path.stem) or "doc"
+    digest = hashlib.sha256(path.name.encode("utf-8")).hexdigest()[:10]
+    return f"{stem}_{digest}"
 
 
 def _build_text_document(path: Path, title: str, text: str) -> ParsedDocument:
@@ -67,11 +75,13 @@ def _load_structured_json(path: Path) -> ParsedDocument:
 def parse_local_document(path: Path) -> ParsedDocument:
     suffix = path.suffix.lower()
     if suffix == ".json":
-        return _load_structured_json(path)
-    if suffix in {".pdf", ".docx", ".pptx"}:
-        return parse_document(path)
+        doc = _load_structured_json(path)
+    elif suffix in {".pdf", ".docx", ".pptx"}:
+        doc = parse_document(path)
+    else:
+        doc = _build_text_document(path, path.stem, path.read_text(encoding="utf-8"))
 
-    return _build_text_document(path, path.stem, path.read_text(encoding="utf-8"))
+    return doc.model_copy(update={"document_id": _unique_document_id(path)})
 
 
 def load_local_documents() -> List[ParsedDocument]:

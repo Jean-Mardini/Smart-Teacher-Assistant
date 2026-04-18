@@ -16,9 +16,21 @@ const IconChat = () => (
     <path d="M21 12a7 7 0 01-7 7H8l-5 3v-3H5a7 7 0 117-7h6z" />
   </svg>
 )
-const IconSpark = () => (
-  <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor">
-    <path d="M12 2l1.8 5.5h5.7l-4.6 3.4 1.8 5.6L12 15.9 7.3 16.5l1.8-5.6L4.5 7.5h5.7L12 2z" opacity="0.92" />
+const IconLines = () => (
+  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
+    <path d="M4 7h16M4 12h16M4 17h10" strokeLinecap="round" />
+  </svg>
+)
+const IconDeck = () => (
+  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
+    <rect x="4" y="3" width="16" height="12" rx="2" />
+    <path d="M8 21h8M12 15v6" strokeLinecap="round" />
+  </svg>
+)
+const IconMark = () => (
+  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
+    <circle cx="12" cy="12" r="8" />
+    <path d="M12 8v4l2 2" strokeLinecap="round" />
   </svg>
 )
 const IconGrade = () => (
@@ -31,8 +43,10 @@ const links = [
   { to: '/', label: 'Home', Icon: IconHome },
   { to: '/library', label: 'Library', Icon: IconBook },
   { to: '/chat', label: 'Dialogue', Icon: IconChat },
-  { to: '/studio', label: 'Studio', Icon: IconSpark },
-  { to: '/grade', label: 'Grading salon', Icon: IconGrade },
+  { to: '/summarize', label: 'Summarize', Icon: IconLines },
+  { to: '/slides', label: 'Slides', Icon: IconDeck },
+  { to: '/quiz', label: 'Quiz', Icon: IconMark },
+  { to: '/grade', label: 'Grading', Icon: IconGrade },
 ]
 
 export function Shell() {
@@ -53,7 +67,7 @@ export function Shell() {
           <span className="rail__tag">USJ Capstone</span>
           <span className="rail__title">Smart Teacher Assistant</span>
         </div>
-        <nav className="nav" aria-label="Main">
+        <nav className="nav nav--stack" aria-label="Main">
           {links.map(({ to, label, Icon }) => (
             <NavLink key={to} to={to} end={to === '/'} className={({ isActive }) => (isActive ? 'active' : '')}>
               <Icon />
@@ -62,7 +76,7 @@ export function Shell() {
           ))}
         </nav>
         <p className="rail__foot">
-          Teaching as craft — documents, dialogue, and fair grading in one calm workspace.
+          Each tool has its own screen — upload or pick a document where needed. Start the API on port 8000.
         </p>
       </aside>
       <main className="canvas">

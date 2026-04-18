@@ -67,6 +67,8 @@ npm run dev
 
 Open the URL Vite prints (usually http://127.0.0.1:5173). Run the API on port 8000, or set `VITE_API_URL` in `frontend/.env.local` (see `frontend/.env.example`).
 
+The sidebar separates **Library**, **Dialogue**, **Summarize**, **Slides**, **Quiz**, and **Grading** — each screen can upload or pick a document where needed. If the UI shows a connection error, ensure uvicorn is running and `VITE_API_URL` matches it.
+
 ## Optional UIs (Streamlit)
 
 ```bash

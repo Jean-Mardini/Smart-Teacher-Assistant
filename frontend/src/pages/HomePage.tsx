@@ -62,25 +62,37 @@ export function HomePage() {
         <Link to="/library">
           <article className="bento__card panel--lift">
             <h3>Library</h3>
-            <p>Upload readings and handouts; keep your knowledge base in one luminous shelf.</p>
+            <p>Upload materials and rebuild the search index for Dialogue.</p>
           </article>
         </Link>
         <Link to="/chat">
           <article className="bento__card panel--lift">
             <h3>Dialogue</h3>
-            <p>Ask questions grounded in your documents — answers with traceable sources.</p>
+            <p>Chat with your indexed documents — grounded answers.</p>
           </article>
         </Link>
-        <Link to="/studio">
+        <Link to="/summarize">
           <article className="bento__card panel--lift">
-            <h3>Studio</h3>
-            <p>Summaries, slide decks, and quizzes — crafted from a chosen text.</p>
+            <h3>Summarize</h3>
+            <p>Upload a PDF or Word file and get a structured summary.</p>
+          </article>
+        </Link>
+        <Link to="/slides">
+          <article className="bento__card panel--lift">
+            <h3>Slides</h3>
+            <p>Slide deck outline from one document.</p>
+          </article>
+        </Link>
+        <Link to="/quiz">
+          <article className="bento__card panel--lift">
+            <h3>Quiz</h3>
+            <p>Questions generated from your reading.</p>
           </article>
         </Link>
         <Link to="/grade">
           <article className="bento__card panel--lift">
-            <h3>Grading salon</h3>
-            <p>Rubrics and fair scoring with transparent rationale — Kristy&apos;s flexible grader.</p>
+            <h3>Grading</h3>
+            <p>Rubrics and scoring with clear rationale.</p>
           </article>
         </Link>
       </div>
