@@ -2,6 +2,7 @@ fastapi
 uvicorn
 streamlit
 pdfplumber
+pypdf
 python-docx
 pandas
 python-pptx

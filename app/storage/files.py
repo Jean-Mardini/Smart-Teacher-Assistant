@@ -15,6 +15,7 @@ def ensure_storage_dirs() -> None:
         settings.parsed_dir,
         settings.vector_store_path.parent,
         settings.knowledge_base_dir,
+        get_evaluation_dir(),
     ):
         Path(path).mkdir(parents=True, exist_ok=True)
 
@@ -22,6 +23,13 @@ def ensure_storage_dirs() -> None:
 def get_knowledge_base_dir() -> Path:
     ensure_storage_dirs()
     return settings.knowledge_base_dir
+
+
+def get_evaluation_dir() -> Path:
+    """Kristy's Flexible Grader: config, presets, and history under data/evaluation/."""
+    path = settings.data_dir / "evaluation"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
 
 
 def get_parsed_images_dir() -> Path:
