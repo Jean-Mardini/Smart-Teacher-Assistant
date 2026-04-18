@@ -30,6 +30,10 @@ python -m uvicorn app.main:app --reload
 | http://127.0.0.1:8000/docs | OpenAPI / Swagger |
 | http://127.0.0.1:8000/health | Health check |
 | http://127.0.0.1:8000/evaluation/status | Evaluation module flags (Kristy) |
+| http://127.0.0.1:8000/graph/info | LangGraph orchestration (nodes) |
+| http://127.0.0.1:8000/graph/invoke | **Unified teaching workflow** (classify → dialogue / summarize / slides / quiz / grade) |
+
+`POST /chat` runs the same graph with `intent=dialogue` (RAG + Groq). Prefer `POST /graph/invoke` with `intent: auto` to let the model route the request, or set a fixed intent and supply `document_id`, `rubric_items`, etc.
 
 CORS allows local frontends on ports 5173, 3000, 8501 (Vite/React/Streamlit).
 
@@ -81,6 +85,7 @@ streamlit run streamlit_app.py
 | Document processing | `app/services/document_processing/` |
 | RAG / knowledge | `app/services/knowledge/` |
 | Agents | `app/services/agents/` |
+| LangGraph orchestration | `app/services/agents/orchestration/` (`assistant_graph.py`) |
 | Evaluation | `app/services/evaluation/` |
 | Orchestration (optional) | `app/services/agents/orchestration/` |
 

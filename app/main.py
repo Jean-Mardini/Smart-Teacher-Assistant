@@ -10,7 +10,7 @@ except ImportError:
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api.routers import agents, chat, documents, evaluation, rag
+from app.api.routers import agents, chat, documents, evaluation, graph, rag
 from app.storage.files import ensure_storage_dirs
 
 app = FastAPI(
@@ -48,4 +48,5 @@ app.include_router(agents.router)
 app.include_router(chat.router)
 app.include_router(documents.router)
 app.include_router(rag.router)
+app.include_router(graph.router)
 app.include_router(evaluation.router, prefix="/evaluation", tags=["evaluation"])
