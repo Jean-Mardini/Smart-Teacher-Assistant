@@ -51,7 +51,19 @@ Outputs JSON under `outputs/json/` and images under `outputs/images/`.
 
 ---
 
-## Optional UIs
+## Web UI (Vite — recommended)
+
+A dedicated **Atelier** interface lives in `frontend/` (React + TypeScript, not Streamlit).
+
+```bash
+cd frontend
+npm install
+npm run dev
+```
+
+Open the URL Vite prints (usually http://127.0.0.1:5173). Run the API on port 8000, or set `VITE_API_URL` in `frontend/.env.local` (see `frontend/.env.example`).
+
+## Optional UIs (Streamlit)
 
 ```bash
 streamlit run streamlit_app.py
@@ -63,6 +75,7 @@ streamlit run streamlit_app.py
 
 | Area | Path |
 |------|------|
+| Web UI (Atelier) | `frontend/` |
 | API routers | `app/api/routers/` |
 | Models | `app/models/` |
 | Document processing | `app/services/document_processing/` |
