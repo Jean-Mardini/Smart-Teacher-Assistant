@@ -14,13 +14,14 @@ class RetrievedChunk:
     Container for a retrieved chunk and its associated metadata.
     """
 
-    score: float
-    document_id: str
-    section_id: str
-    section_heading: str
-    page_start: int
-    page_end: int | None
     chunk_text: str
+    score: float
+    document_id: str | None
+    section_id: str | None
+    section_heading: str
+    page_start: int | None
+    page_end: int | None
+    chunk_id: str | None
 
 
 class Retriever:
@@ -57,13 +58,20 @@ class Retriever:
 
             chunks.append(
                 RetrievedChunk(
-                    score=score,
-                    document_id=str(r.get("document_id", "")),
-                    section_id=str(r.get("section_id", "")),
-                    section_heading=str(r.get("section_heading", "")),
-                    page_start=int(r.get("page_start") or 0),
-                    page_end=r.get("page_end"),
                     chunk_text=str(r.get("chunk_text", "")),
+                    score=score,
+                    document_id=(
+                        str(r["document_id"]) if r.get("document_id") is not None else None
+                    ),
+                    section_id=(
+                        str(r["section_id"]) if r.get("section_id") is not None else None
+                    ),
+                    section_heading=str(r.get("section_heading", "")),
+                    page_start=(
+                        int(r["page_start"]) if r.get("page_start") is not None else None
+                    ),
+                    page_end=int(r["page_end"]) if r.get("page_end") is not None else None,
+                    chunk_id=str(r["chunk_id"]) if r.get("chunk_id") is not None else None,
                 )
             )
 

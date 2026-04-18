@@ -62,6 +62,7 @@ class VectorStore:
             embeddings: 2D NumPy array of shape (n_chunks, dim).
             metadata: List of metadata dicts, one per chunk. Each dict should
                 include at least:
+                    - chunk_id (optional but recommended)
                     - document_id
                     - section_id
                     - section_heading

@@ -4,62 +4,48 @@ from typing import Any, Dict, Iterable, List, Sequence
 
 from .chunker import chunk_text
 from .embeddings import Embeddings
-from .generator import AnswerGenerator, DEFAULT_LLM_MODEL
 from .retriever import RetrievedChunk, Retriever
 from .vector_store import VectorStore
 
 
+MIN_RETRIEVAL_SCORE = 0.35
+
+
 class RAGPipeline:
     """
-    Modular Retrieval-Augmented Generation pipeline.
+    Retrieval-only RAG pipeline for integration with the external chat layer.
 
-    This class composes the following components:
-      - `chunker.chunk_text` for text chunking.
-      - `Embeddings` for turning text into dense vectors.
-      - `VectorStore` for FAISS-based vector search.
-      - `Retriever` for retrieving relevant chunks.
-      - `AnswerGenerator` for LLM-based answer generation.
+    Responsibilities:
+      - Chunk section text.
+      - Embed chunks and questions.
+      - Store vectors and metadata in the vector store.
+      - Retrieve relevant chunks for downstream generation.
 
-    The implementation is framework-agnostic and CPU-friendly, making it easy
-    to integrate with FastAPI or other backends.
+    This module is intentionally retrieval-only. Final prompt assembly and LLM
+    generation are handled externally by the chat/generation layer (Angela).
     """
 
     def __init__(
         self,
         embedding_model_name: str = "sentence-transformers/all-mpnet-base-v2",
-        llm_model_name: str = DEFAULT_LLM_MODEL,
         device: str = "cpu",
         vector_store: VectorStore | None = None,
         embeddings: Embeddings | None = None,
         retriever: Retriever | None = None,
-        generator: AnswerGenerator | None = None,
     ) -> None:
-        # Embeddings
+        # CPU-friendly retrieval components.
         self.embeddings: Embeddings = embeddings or Embeddings(
             model_name=embedding_model_name,
             device=device,
         )
-
-        # Vector store
         self.vector_store: VectorStore = vector_store or VectorStore(
             dim=self.embeddings.dimension
         )
-
-        # Retriever
         self.retriever: Retriever = retriever or Retriever(self.vector_store)
 
-        # Generator (LLM)
-        self.generator: AnswerGenerator = generator or AnswerGenerator(
-            model_name=llm_model_name,
-            device=device,
-        )
-
-    # ------------------------------------------------------------------ #
-    # Indexing
-    # ------------------------------------------------------------------ #
     def _index_single_document(self, json_document: Dict[str, Any]) -> None:
         """
-        Index a single parsed document JSON into the vector store.
+        Index one parsed document JSON into the vector store.
 
         Expected schema:
             {
@@ -68,24 +54,23 @@ class RAGPipeline:
               "sections": [
                 {
                   "section_id": "sec_1",
-                  "heading": "What is Machine Learning",
+                  "heading": "...",
                   "page_start": 1,
                   "page_end": 2,
                   "text": "..."
-                },
-                ...
+                }
               ]
             }
         """
-        document_id = json_document.get("document_id")
+        document_id = str(json_document.get("document_id") or "")
         sections: Sequence[Dict[str, Any]] = json_document.get("sections", []) or []
 
         all_chunks: List[str] = []
         all_metadata: List[Dict[str, Any]] = []
 
         for section in sections:
-            section_id = section.get("section_id")
-            heading = section.get("heading") or ""
+            section_id = str(section.get("section_id") or "")
+            heading = str(section.get("heading") or "")
             page_start = section.get("page_start")
             page_end = section.get("page_end")
             text = section.get("text") or ""
@@ -94,10 +79,12 @@ class RAGPipeline:
                 continue
 
             chunks = chunk_text(text)
-            for chunk in chunks:
+            for chunk_index, chunk in enumerate(chunks):
+                chunk_id = f"{document_id}:{section_id}:{chunk_index}"
                 all_chunks.append(chunk)
                 all_metadata.append(
                     {
+                        "chunk_id": chunk_id,
                         "document_id": document_id,
                         "section_id": section_id,
                         "section_heading": heading,
@@ -110,92 +97,72 @@ class RAGPipeline:
         if not all_chunks:
             return
 
-        embeddings = self.embeddings.embed_batch(all_chunks)
-        self.vector_store.add_chunks(all_chunks, embeddings, all_metadata)
+        batch_embeddings = self.embeddings.embed_batch(all_chunks)
+        self.vector_store.add_chunks(all_chunks, batch_embeddings, all_metadata)
 
     def index_documents(self, json_docs: Iterable[Dict[str, Any]]) -> None:
         """
-        Index one or more documents into the vector store.
-
-        Args:
-            json_docs: Iterable of document JSON objects following the schema
-                described in `_index_single_document`.
+        Index one or more structured JSON documents into the vector store.
         """
         for doc in json_docs:
             self._index_single_document(doc)
 
-    # ------------------------------------------------------------------ #
-    # Question answering
-    # ------------------------------------------------------------------ #
-    def answer_question(self, question: str, top_k: int = 3) -> Dict[str, Any]:
+    def retrieve_chunks(self, question: str, top_k: int = 3) -> List[Dict[str, Any]]:
         """
-        Answer a question using the indexed documents.
+        Retrieval integration surface for the external chat/generation layer.
 
-        Returns:
-            JSON-serialisable dict with the schema:
-                {
-                  "answer": "...",
-                  "sources": [
-                    {
-                      "section": "Types of Machine Learning",
-                      "page": 3
-                    }
-                  ]
-                }
+        Steps:
+          1) Embed the incoming question.
+          2) Retrieve relevant chunks from the vector store.
+          3) Apply score threshold filtering.
+          4) Return structured chunk payloads for external generation.
+
+        Returns list schema:
+            [
+              {
+                "chunk_id": "...",
+                "document_id": "...",
+                "section_id": "...",
+                "section": "...",
+                "page_start": 3,
+                "page_end": 4,
+                "score": 0.78,
+                "text": "..."
+              }
+            ]
         """
         if not question.strip():
-            return {
-                "answer": "Answer not found in the document.",
-                "sources": [],
-            }
+            return []
 
-        query_emb = self.embeddings.embed_text(question)
+        query_embedding = self.embeddings.embed_text(question)
         retrieved_chunks: List[RetrievedChunk] = self.retriever.retrieve(
-            query_emb,
+            query_embedding,
             top_k=top_k,
-            min_score=0.35,
+            min_score=MIN_RETRIEVAL_SCORE,
         )
 
-        if not retrieved_chunks:
-            return {
-                "answer": "Answer not found in the document.",
-                "sources": [],
-            }
-
-        answer_text = self.generator.generate_answer(question, retrieved_chunks)
-
-        # Deduplicate sources by (section_heading, page_start).
-        seen: set[tuple[str, int]] = set()
-        sources: List[Dict[str, Any]] = []
-        for c in retrieved_chunks:
-            key = (c.section_heading, c.page_start)
-            if key in seen:
-                continue
-            seen.add(key)
-            sources.append(
+        chunk_results: List[Dict[str, Any]] = []
+        for chunk in retrieved_chunks:
+            chunk_results.append(
                 {
-                    "section": c.section_heading,
-                    "page": c.page_start,
+                    "chunk_id": chunk.chunk_id,
+                    "document_id": chunk.document_id,
+                    "section_id": chunk.section_id,
+                    "section": chunk.section_heading,
+                    "page_start": chunk.page_start,
+                    "page_end": chunk.page_end,
+                    "score": chunk.score,
+                    "text": chunk.chunk_text,
                 }
             )
 
-        return {
-            "answer": answer_text,
-            "sources": sources,
-        }
+        return chunk_results
 
 
-__all__ = ["RAGPipeline"]
+__all__ = ["RAGPipeline", "MIN_RETRIEVAL_SCORE"]
 
 
 if __name__ == "__main__":
-    """
-    Minimal end-to-end test for the RAG pipeline.
-
-    This is intended for local verification only and will not execute
-    when the module is imported elsewhere (e.g. in FastAPI routes).
-    """
-
     import json
 
     sample_document = {
@@ -227,8 +194,7 @@ if __name__ == "__main__":
 
     pipeline = RAGPipeline(device="cpu")
     pipeline.index_documents([sample_document])
-
     question = "What are the main types of machine learning?"
-    result = pipeline.answer_question(question)
+    result = pipeline.retrieve_chunks(question)
 
     print(json.dumps(result, indent=2, ensure_ascii=False))

@@ -18,11 +18,19 @@ DEFAULT_LLM_MODEL = "google/flan-t5-base"
 
 class AnswerGenerator:
     """
-    Responsible for turning retrieved chunks + a user question into an answer
-    using a local HuggingFace seq2seq model (default: `google/flan-t5-base`).
+    Local / development-only answer generator.
 
-    The class is intentionally CPU-friendly: it defaults to running entirely on
-    CPU with `float32` weights and conservative generation settings.
+    This class is used for end-to-end testing of the RAG pipeline by turning
+    retrieved chunks + a user question into an answer using a local
+    HuggingFace seq2seq model (default: `google/flan-t5-base`).
+
+    In the final architecture, the external chat/generation layer (Angela)
+    will own the production LLM call. This generator should be treated as a
+    convenience for local validation rather than the primary integration path.
+
+    The implementation is intentionally CPU-friendly: it defaults to running
+    entirely on CPU with `float32` weights and conservative generation
+    settings.
     """
 
     def __init__(
