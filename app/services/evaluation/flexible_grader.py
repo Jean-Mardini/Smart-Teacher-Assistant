@@ -1,3 +1,18 @@
+"""Flexible Grader — rubric generation, reference-grounded scoring, and exports (Kristy).
+
+This module is the **authoritative implementation** of Kristy's capstone evaluation work: Groq
+(OpenAI-compatible client), PDF/DOCX/PPTX text extraction, lightweight reference retrieval,
+batch grading, and TXT/DOCX/HTML reports. Configuration and history live under ``data/evaluation/``.
+
+- **Streamlit UI:** ``streamlit_flexible_grader.py`` (imports this module).
+- **HTTP API:** ``app/api/routers/evaluation.py`` calls into here.
+
+Team-facing wrappers: :mod:`rubrics`, :mod:`grading`, :mod:`feedback`, :mod:`analytics` re-export
+the relevant entry points for clearer imports elsewhere in the codebase.
+"""
+
+from __future__ import annotations
+
 import io
 import json
 import os
@@ -8,11 +23,11 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 from docx import Document
-
-from app.storage.files import get_evaluation_dir
 from openai import OpenAI
 from pypdf import PdfReader
 from pptx import Presentation
+
+from app.storage.files import get_evaluation_dir
 
 APP_TITLE = "Flexible Grader"
 DEFAULT_MODEL = "llama-3.3-70b-versatile"

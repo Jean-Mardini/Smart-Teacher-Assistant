@@ -1,4 +1,8 @@
-"""Data models for rubrics, grading results, and analytics outputs."""
+"""Data models for rubrics, grading results, and analytics outputs.
+
+API request/response shapes for Kristy's Flexible Grader live here; service logic is in
+``app/services/evaluation/flexible_grader.py``.
+"""
 
 from __future__ import annotations
 
