@@ -1,7 +1,5 @@
 """Slide generator agent implementation (owned by Angela)."""
 
-"""angelas part"""
-
 from __future__ import annotations
 
 import re

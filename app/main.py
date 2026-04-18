@@ -1,8 +1,8 @@
-"""angelas part"""
+"""FastAPI entrypoint for Smart Teacher Assistant."""
 
 from fastapi import FastAPI
 
-from app.api.routers import agents, chat, documents, rag
+from app.api.routers import agents, chat, documents, evaluation, rag
 from app.storage.files import ensure_storage_dirs
 
 app = FastAPI(
@@ -24,3 +24,4 @@ app.include_router(agents.router)
 app.include_router(chat.router)
 app.include_router(documents.router)
 app.include_router(rag.router)
+app.include_router(evaluation.router, prefix="/evaluation", tags=["evaluation"])

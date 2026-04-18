@@ -1,7 +1,5 @@
 """Data models for RAG (chunks, retrieval results, queries, etc.)."""
 
-"""angelas part"""
-
 from __future__ import annotations
 
 from typing import Dict, List, Optional

@@ -1,7 +1,5 @@
 """Export helpers for quiz outputs."""
 
-"""angelas part"""
-
 from __future__ import annotations
 
 from xml.etree.ElementTree import Element, SubElement, tostring

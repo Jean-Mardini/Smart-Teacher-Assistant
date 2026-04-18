@@ -1,7 +1,5 @@
 """Runtime chunking configuration."""
 
-"""angelas part"""
-
 from __future__ import annotations
 
 import json

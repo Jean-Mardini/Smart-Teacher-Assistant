@@ -1,7 +1,5 @@
 """Helpers for optional AI image generation for slide decks."""
 
-"""angelas part"""
-
 from __future__ import annotations
 
 import base64

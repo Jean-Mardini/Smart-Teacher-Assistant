@@ -1,7 +1,5 @@
 """Retrieval logic for fetching relevant chunks from the vector store."""
 
-"""angelas part"""
-
 from __future__ import annotations
 
 from typing import List

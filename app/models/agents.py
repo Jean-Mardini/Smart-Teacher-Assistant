@@ -4,8 +4,6 @@ Each agent (summarizer, quiz, slides, rubric, grading, chat, cross-doc)
 will have request/response models defined here.
 """
 
-"""angelas part"""
-
 from typing import List, Literal, Optional
 
 from pydantic import BaseModel, Field, model_validator

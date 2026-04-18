@@ -1,7 +1,5 @@
 """Helpers for persisting extracted document images as reusable local assets."""
 
-"""angelas part"""
-
 from __future__ import annotations
 
 from io import BytesIO

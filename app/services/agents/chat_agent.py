@@ -1,7 +1,5 @@
 """Chat-with-documents agent implementation (owned by Mark and Angela)."""
 
-"""angelas part"""
-
 from __future__ import annotations
 
 from typing import Any

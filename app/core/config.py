@@ -1,7 +1,5 @@
 """Global configuration module."""
 
-"""angelas part"""
-
 from __future__ import annotations
 
 import os

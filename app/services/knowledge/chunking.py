@@ -1,7 +1,5 @@
 """Chunking strategies for turning parsed documents into embedding-ready chunks."""
 
-"""angelas part"""
-
 from __future__ import annotations
 
 from typing import List

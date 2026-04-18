@@ -1,7 +1,5 @@
 """Simple JSON-backed vector store for local RAG."""
 
-"""angelas part"""
-
 from __future__ import annotations
 
 import json

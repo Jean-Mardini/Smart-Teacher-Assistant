@@ -1,7 +1,5 @@
 """Routers for RAG (indexing and retrieval) diagnostics and operations."""
 
-"""angelas part"""
-
 from fastapi import APIRouter
 
 from app.models.rag import IndexingResult, RAGStatus, ReindexRequest

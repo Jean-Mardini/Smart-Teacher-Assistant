@@ -1,5 +1,3 @@
-"""angelas part"""
-
 import os
 import json
 import re

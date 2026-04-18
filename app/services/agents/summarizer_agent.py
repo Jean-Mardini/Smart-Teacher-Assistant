@@ -1,7 +1,5 @@
 """Summarizer agent implementation (owned by Angela)."""
 
-"""angelas part"""
-
 from __future__ import annotations
 
 import json

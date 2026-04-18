@@ -1,7 +1,5 @@
 """High-level indexing pipeline (parsed document -> vector store)."""
 
-"""angelas part"""
-
 from __future__ import annotations
 
 import json

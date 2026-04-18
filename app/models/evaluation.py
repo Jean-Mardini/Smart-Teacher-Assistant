@@ -3,6 +3,4 @@
 Kristy will define Rubric, Criterion, GradeResult, Feedback, etc. here.
 """
 
-"""angelas part"""
-
 

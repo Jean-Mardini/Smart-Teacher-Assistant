@@ -1,7 +1,5 @@
 """PDF-specific parsing logic using pdfplumber."""
 
-"""angelas part"""
-
 from __future__ import annotations
 
 from pathlib import Path

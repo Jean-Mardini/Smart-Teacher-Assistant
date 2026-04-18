@@ -1,7 +1,5 @@
 """Routers for document-related endpoints (upload, list, inspect)."""
 
-"""angelas part"""
-
 from __future__ import annotations
 
 from pathlib import Path

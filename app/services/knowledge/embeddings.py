@@ -4,8 +4,6 @@ This project uses a lightweight local tokenizer + cosine similarity fallback so
 chat can work without an external embedding API.
 """
 
-"""angelas part"""
-
 from __future__ import annotations
 
 import math

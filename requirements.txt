@@ -11,3 +11,4 @@ chromadb
 openai
 python-dotenv
 pytesseract
+groq

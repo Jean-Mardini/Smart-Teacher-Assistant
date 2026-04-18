@@ -1,7 +1,5 @@
 """Routers for chat-with-documents endpoints."""
 
-"""angelas part"""
-
 from importlib import import_module
 from typing import Any, List, Optional
 
@@ -65,7 +63,11 @@ class ChatResponse(BaseModel):
 @router.post("/chat", response_model=ChatResponse)
 async def chat(req: ChatRequest):
     if retriever is None:
-        return {"answer": "RAG not ready yet", "sources": [], "processing_notes": []}
+        return ChatResponse(
+            answer="RAG not ready yet",
+            sources=[],
+            processing_notes=["Retriever not initialized"],
+        )
 
     return await run_chat(
         question=req.question,

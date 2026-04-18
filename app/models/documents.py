@@ -1,7 +1,5 @@
 """Data models for uploaded and parsed documents."""
 
-"""angelas part"""
-
 from __future__ import annotations
 
 from typing import Any, Dict, List, Optional

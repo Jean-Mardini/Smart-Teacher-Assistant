@@ -1,5 +1,3 @@
-"""angelas part"""
-
 from fastapi import APIRouter, HTTPException, Response
 
 # ----------- MODELS -----------

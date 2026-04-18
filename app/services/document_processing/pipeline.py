@@ -1,7 +1,5 @@
 """High-level document processing pipeline (upload -> parse -> structured JSON)."""
 
-"""angelas part"""
-
 from __future__ import annotations
 
 from pathlib import Path

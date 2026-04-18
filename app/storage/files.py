@@ -1,7 +1,5 @@
 """File storage utilities: directories for uploads, parsed docs, and results."""
 
-"""angelas part"""
-
 from __future__ import annotations
 
 from pathlib import Path
