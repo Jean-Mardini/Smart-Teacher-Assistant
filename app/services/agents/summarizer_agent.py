@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
+import os
 from pathlib import Path
 from typing import Any
 
@@ -15,10 +17,13 @@ PROMPT_PATH = Path(__file__).resolve().parents[2] / "prompts" / "summarize.md"
 MAX_SUMMARY_DOCUMENTS = 10
 MAX_SUMMARY_PAGES = 250
 MAX_SUMMARY_CHARS = 250_000
-SUMMARY_CHUNK_SIZE = 12_000
-SUMMARY_CHUNK_OVERLAP = 1_000
-REDUCTION_CHUNK_SIZE = 14_000
-REDUCTION_CHUNK_OVERLAP = 1_000
+# Larger chunks = fewer Groq round-trips (still safe for llama-3.x context on Groq).
+SUMMARY_CHUNK_SIZE = int(os.getenv("SUMMARY_CHUNK_SIZE", "20000"))
+SUMMARY_CHUNK_OVERLAP = int(os.getenv("SUMMARY_CHUNK_OVERLAP", "800"))
+REDUCTION_CHUNK_SIZE = int(os.getenv("REDUCTION_CHUNK_SIZE", "22000"))
+REDUCTION_CHUNK_OVERLAP = int(os.getenv("REDUCTION_CHUNK_OVERLAP", "800"))
+# Parallel partial summarization (independent API calls); cap to avoid rate-limit bursts.
+SUMMARY_MAX_PARALLEL = max(1, min(int(os.getenv("SUMMARY_MAX_PARALLEL", "4")), 12))
 
 
 def _normalize_documents(doc_json: dict[str, Any] | list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -197,7 +202,7 @@ def _validate_limits(documents: list[dict[str, Any]], total_pages: int, combined
         )
 
 
-def _synthesize_long_input(
+async def _synthesize_long_input(
     prompt: str,
     title: str,
     combined_text: str,
@@ -208,10 +213,16 @@ def _synthesize_long_input(
         overlap=SUMMARY_CHUNK_OVERLAP,
     )
 
-    partial_summaries: list[dict[str, Any]] = []
-    for index, piece in enumerate(base_chunks, start=1):
+    sem = asyncio.Semaphore(SUMMARY_MAX_PARALLEL)
+
+    async def _partial(index: int, piece: str) -> dict[str, Any]:
         partial_title = f"{title} - chunk {index}/{len(base_chunks)}"
-        partial_summaries.append(_call_summary_prompt(prompt, partial_title, piece))
+        async with sem:
+            return await asyncio.to_thread(_call_summary_prompt, prompt, partial_title, piece)
+
+    partial_summaries = await asyncio.gather(
+        *[_partial(i, p) for i, p in enumerate(base_chunks, start=1)]
+    )
 
     serialized = "\n\n".join(
         _serialize_partial(index, partial)
@@ -225,23 +236,29 @@ def _synthesize_long_input(
     )
 
     if len(reduction_chunks) == 1:
-        final_data = _call_summary_prompt(
+        final_data = await asyncio.to_thread(
+            _call_summary_prompt,
             prompt,
             f"{title} - final synthesis",
             reduction_chunks[0],
         )
         return final_data, len(base_chunks)
 
-    reduction_partials: list[dict[str, Any]] = []
-    for index, piece in enumerate(reduction_chunks, start=1):
+    async def _reduction(index: int, piece: str) -> dict[str, Any]:
         reduction_title = f"{title} - reduction {index}/{len(reduction_chunks)}"
-        reduction_partials.append(_call_summary_prompt(prompt, reduction_title, piece))
+        async with sem:
+            return await asyncio.to_thread(_call_summary_prompt, prompt, reduction_title, piece)
+
+    reduction_partials = await asyncio.gather(
+        *[_reduction(i, p) for i, p in enumerate(reduction_chunks, start=1)]
+    )
 
     final_serialized = "\n\n".join(
         _serialize_partial(index, partial)
         for index, partial in enumerate(reduction_partials, start=1)
     )
-    final_data = _call_summary_prompt(
+    final_data = await asyncio.to_thread(
+        _call_summary_prompt,
         prompt,
         f"{title} - final synthesis",
         final_serialized,
@@ -283,10 +300,10 @@ async def run_summarizer(
     )
 
     if len(chunk_candidates) <= 1:
-        data = _call_summary_prompt(prompt, title, combined_text)
+        data = await asyncio.to_thread(_call_summary_prompt, prompt, title, combined_text)
         chunk_count = 1
     else:
-        data, chunk_count = _synthesize_long_input(prompt, title, combined_text)
+        data, chunk_count = await _synthesize_long_input(prompt, title, combined_text)
 
     processing_notes = _collect_processing_notes(
         documents,

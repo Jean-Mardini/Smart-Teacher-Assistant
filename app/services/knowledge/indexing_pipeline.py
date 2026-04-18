@@ -7,7 +7,7 @@ import json
 from pathlib import Path
 from typing import List
 
-from app.models.documents import DocumentMetadata, ParsedDocument, Section
+from app.models.documents import DocumentMetadata, LocalDocumentInfo, ParsedDocument, Section
 from app.models.rag import IndexingResult
 from app.services.document_processing.pipeline import parse_document
 from app.services.knowledge.chunking import chunk_document
@@ -21,11 +21,48 @@ def _slugify(value: str) -> str:
     return "_".join(part for part in clean.split("_") if part) or "document"
 
 
+_KNOWN_SUFFIXES = frozenset({".txt", ".md", ".json", ".pdf", ".docx", ".pptx"})
+
+
 def _unique_document_id(path: Path) -> str:
     """Stable unique id per file path (avoids every PDF becoming ``doc_1``)."""
     stem = _slugify(path.stem) or "doc"
     digest = hashlib.sha256(path.name.encode("utf-8")).hexdigest()[:10]
     return f"{stem}_{digest}"
+
+
+def list_local_document_infos_light() -> List[LocalDocumentInfo]:
+    """List knowledge-base files **without** parsing PDFs/DOCX (fast — for API ``GET /documents/local``)."""
+    out: List[LocalDocumentInfo] = []
+    knowledge_base_dir = get_knowledge_base_dir()
+    for path in sorted(knowledge_base_dir.iterdir()):
+        if not path.is_file():
+            continue
+        suf = path.suffix.lower()
+        if suf not in _KNOWN_SUFFIXES:
+            continue
+        out.append(
+            LocalDocumentInfo(
+                document_id=_unique_document_id(path),
+                title=path.stem,
+                path=str(path.resolve()),
+                filetype=suf.lstrip(".") or "bin",
+            )
+        )
+    return out
+
+
+def resolve_path_for_document_id(document_id: str) -> Path | None:
+    """Map a ``document_id`` to a file path without parsing."""
+    knowledge_base_dir = get_knowledge_base_dir()
+    for path in sorted(knowledge_base_dir.iterdir()):
+        if not path.is_file():
+            continue
+        if path.suffix.lower() not in _KNOWN_SUFFIXES:
+            continue
+        if _unique_document_id(path) == document_id:
+            return path
+    return None
 
 
 def _build_text_document(path: Path, title: str, text: str) -> ParsedDocument:
@@ -91,7 +128,7 @@ def load_local_documents() -> List[ParsedDocument]:
     for path in sorted(knowledge_base_dir.iterdir()):
         if not path.is_file():
             continue
-        if path.suffix.lower() not in {".txt", ".md", ".json", ".pdf", ".docx", ".pptx"}:
+        if path.suffix.lower() not in _KNOWN_SUFFIXES:
             continue
 
         try:
@@ -103,10 +140,14 @@ def load_local_documents() -> List[ParsedDocument]:
 
 
 def get_local_document_by_id(document_id: str) -> ParsedDocument | None:
-    for document in load_local_documents():
-        if document.document_id == document_id:
-            return document
-    return None
+    """Parse **only** the matching file (fast path — does not parse the whole library)."""
+    path = resolve_path_for_document_id(document_id)
+    if path is None:
+        return None
+    try:
+        return parse_local_document(path)
+    except Exception:
+        return None
 
 
 def index_knowledge_base(

@@ -9,8 +9,11 @@ except ImportError:
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+from starlette.requests import Request
 
 from app.api.routers import agents, chat, documents, evaluation, graph, rag
+from app.services.llm.groq_client import LLMConfigurationError
 from app.storage.files import ensure_storage_dirs
 
 app = FastAPI(
@@ -35,6 +38,12 @@ app.add_middleware(
 )
 
 ensure_storage_dirs()
+
+
+@app.exception_handler(LLMConfigurationError)
+async def llm_configuration_handler(_request: Request, exc: LLMConfigurationError):
+    return JSONResponse(status_code=503, content={"detail": str(exc)})
+
 
 @app.get("/")
 async def root():

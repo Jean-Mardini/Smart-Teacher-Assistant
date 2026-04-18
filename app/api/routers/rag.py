@@ -1,9 +1,11 @@
 """Routers for RAG (indexing and retrieval) diagnostics and operations."""
 
+from pathlib import Path
+
 from fastapi import APIRouter
 
 from app.models.rag import IndexingResult, RAGStatus, ReindexRequest
-from app.services.knowledge.indexing_pipeline import load_local_documents
+from app.services.knowledge.indexing_pipeline import list_local_document_infos_light
 from app.services.knowledge.chunking_config import get_chunking_config
 from app.services.knowledge.retrieval import Retriever
 from app.services.knowledge.vector_store import LocalVectorStore
@@ -15,13 +17,13 @@ router = APIRouter(prefix="/rag", tags=["rag"])
 @router.get("/status", response_model=RAGStatus)
 async def rag_status():
     store = LocalVectorStore()
-    documents = load_local_documents()
+    docs = list_local_document_infos_light()
     return RAGStatus(
         knowledge_base_dir=str(get_knowledge_base_dir()),
         vector_store_path=str(get_vector_store_path()),
         indexed_chunks=store.count(),
         indexed_documents=store.document_count(),
-        available_documents=[document.metadata.filename for document in documents],
+        available_documents=[Path(d.path).name for d in docs],
         chunking=get_chunking_config(),
     )
 

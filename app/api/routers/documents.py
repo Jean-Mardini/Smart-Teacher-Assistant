@@ -7,7 +7,7 @@ from pathlib import Path
 from fastapi import APIRouter, File, HTTPException, UploadFile
 
 from app.models.documents import DocumentUploadResult, LocalDocumentInfo
-from app.services.knowledge.indexing_pipeline import load_local_documents
+from app.services.knowledge.indexing_pipeline import list_local_document_infos_light
 from app.storage.files import get_knowledge_base_dir, sanitize_filename
 
 router = APIRouter(prefix="/documents", tags=["documents"])
@@ -17,16 +17,8 @@ ALLOWED_EXTENSIONS = {".txt", ".md", ".json", ".pdf", ".docx", ".pptx"}
 
 @router.get("/local", response_model=list[LocalDocumentInfo])
 async def list_local_documents():
-    documents = load_local_documents()
-    return [
-        LocalDocumentInfo(
-            document_id=document.document_id,
-            title=document.title,
-            path=document.metadata.source_path or "",
-            filetype=document.metadata.filetype,
-        )
-        for document in documents
-    ]
+    # Fast path: do not parse every PDF on each request
+    return list_local_document_infos_light()
 
 
 @router.post("/upload", response_model=list[DocumentUploadResult])

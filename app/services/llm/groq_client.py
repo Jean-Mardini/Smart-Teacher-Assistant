@@ -10,6 +10,11 @@ except ModuleNotFoundError:
 if load_dotenv is not None:
     load_dotenv()
 
+
+class LLMConfigurationError(Exception):
+    """Raised when Groq is not configured (missing API key or optional dependency)."""
+
+
 API_KEY = os.getenv("GROQ_API_KEY")
 MODEL = os.getenv("GROQ_MODEL", "llama-3.1-8b-instant")
 
@@ -18,11 +23,16 @@ if not API_KEY:
 
 
 def _get_client():
+    if not API_KEY:
+        raise LLMConfigurationError(
+            "GROQ_API_KEY is not set. Add GROQ_API_KEY to a .env file in the project root "
+            "(same folder as app/) or set it in your environment, then restart the API server."
+        )
     try:
         from groq import Groq
     except ModuleNotFoundError as e:
-        raise RuntimeError(
-            "The 'groq' package is not installed. Install dependencies before using LLM endpoints."
+        raise LLMConfigurationError(
+            "The 'groq' package is not installed. Install project dependencies (e.g. pip install groq)."
         ) from e
 
     return Groq(api_key=API_KEY)
