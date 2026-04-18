@@ -18,3 +18,10 @@ Pillow
 langdetect
 arabic-reshaper
 python-bidi
+sentence-transformers
+transformers
+torch
+faiss-cpu
+numpy
+requests
+tiktoken
