@@ -6,9 +6,15 @@ from pathlib import Path
 
 from fastapi import APIRouter, File, HTTPException, UploadFile
 
+import logging
+
 from app.models.documents import DocumentUploadResult, LocalDocumentInfo
 from app.services.knowledge.indexing_pipeline import list_local_document_infos_light
+from app.services.agents.orchestration.assistant_graph import invalidate_retriever_cache
+from app.services.knowledge.retrieval import Retriever
 from app.storage.files import get_knowledge_base_dir, sanitize_filename
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/documents", tags=["documents"])
 
@@ -58,5 +64,11 @@ async def upload_documents(files: list[UploadFile] = File(...)):
                 filetype=suffix.lstrip("."),
             )
         )
+
+    try:
+        Retriever().refresh_index()
+        invalidate_retriever_cache()
+    except Exception:
+        logger.exception("Post-upload search index rebuild failed; user can run Rebuild on Library.")
 
     return results

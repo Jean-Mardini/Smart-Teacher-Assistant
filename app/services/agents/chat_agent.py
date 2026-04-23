@@ -25,11 +25,8 @@ async def run_chat(
     temperature: float = 0.2,
     document_ids: list[str] | None = None,
 ):
-    chunks = retriever.retrieve(question, top_k=top_k)
-
-    if document_ids:
-        allowed = set(document_ids)
-        chunks = [chunk for chunk in chunks if getattr(chunk, "document_id", None) in allowed]
+    ids = [d for d in (document_ids or []) if d and str(d).strip()] or None
+    chunks = retriever.retrieve(question, top_k=top_k, document_ids=ids)
 
     if not chunks:
         return {

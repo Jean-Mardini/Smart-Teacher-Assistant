@@ -43,7 +43,7 @@ def _format_image(image: dict[str, Any], image_notes: list[str]) -> str:
     page = image.get("page", "?")
     caption = (image.get("caption") or "").strip()
     description = (image.get("description") or "").strip()
-    asset_path = (image.get("asset_path") or "").strip()
+    asset_path = (image.get("asset_path") or image.get("path") or "").strip()
 
     if not caption and not description and not asset_path:
         image_notes.append(

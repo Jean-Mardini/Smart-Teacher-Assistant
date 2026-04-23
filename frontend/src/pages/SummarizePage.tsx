@@ -1,34 +1,86 @@
-import { useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import { DocPicker } from '../components/DocPicker'
-import { apiJson } from '../api/client'
+import type { DocRow } from '../components/DocPicker'
+import { apiJson, apiPostBlob, triggerDownload } from '../api/client'
+
+type GlossaryItem = { term?: string; definition?: string }
 
 type SummaryResult = {
   summary?: string
   key_points?: string[]
   action_items?: string[]
+  glossary?: GlossaryItem[]
+  source_documents?: string[]
+  total_pages?: number
+  chunk_count?: number
+  image_notes?: string[]
   processing_notes?: string[]
 }
 
+const MAX_DOCS = 10
+
+const LENGTH_OPTS = [
+  { id: 'short', label: 'Short', hint: 'Brief overview' },
+  { id: 'medium', label: 'Medium', hint: 'Balanced depth' },
+  { id: 'long', label: 'Long', hint: 'More detail' },
+] as const
+
 export function SummarizePage() {
   const [docId, setDocId] = useState('')
+  const [extraIds, setExtraIds] = useState<Set<string>>(() => new Set())
+  const [shelf, setShelf] = useState<DocRow[]>([])
   const [length, setLength] = useState('medium')
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [result, setResult] = useState<SummaryResult | null>(null)
+  const [exportBusy, setExportBusy] = useState<'docx' | 'pdf' | null>(null)
+  const [exportError, setExportError] = useState<string | null>(null)
+
+  const refreshShelf = useCallback(async () => {
+    try {
+      const list = await apiJson<DocRow[]>('/documents/local')
+      setShelf(list)
+    } catch {
+      setShelf([])
+    }
+  }, [])
+
+  useEffect(() => {
+    void refreshShelf()
+  }, [refreshShelf])
+
+  function toggleExtra(id: string) {
+    if (!docId || id === docId) return
+    setExtraIds((prev) => {
+      const next = new Set(prev)
+      if (next.has(id)) next.delete(id)
+      else if (next.size < MAX_DOCS - 1) next.add(id)
+      return next
+    })
+  }
+
+  function resolvedIds(): string[] {
+    const primary = docId.trim()
+    if (!primary) return []
+    const rest = shelf.map((d) => d.document_id).filter((id) => id !== primary && extraIds.has(id))
+    const merged = [primary, ...rest]
+    return Array.from(new Set(merged)).slice(0, MAX_DOCS)
+  }
 
   async function run() {
-    const id = docId.trim()
-    if (!id) {
-      setError('Choose a document above.')
+    const ids = resolvedIds()
+    if (ids.length === 0) {
+      setError('Choose a primary document first. You can add more shelf files after that.')
       return
     }
     setLoading(true)
     setError(null)
     setResult(null)
+    setExportError(null)
     try {
       const res = await apiJson<SummaryResult>('/agents/summarize', {
         method: 'POST',
-        body: JSON.stringify({ document_ids: [id], length }),
+        body: JSON.stringify({ document_ids: ids, length }),
       })
       setResult(res)
     } catch (e) {
@@ -38,66 +90,230 @@ export function SummarizePage() {
     }
   }
 
+  async function exportSummary(format: 'docx' | 'pdf') {
+    if (!result) return
+    setExportError(null)
+    setExportBusy(format)
+    try {
+      const { blob, filename } = await apiPostBlob('/agents/summarize/export', {
+        format,
+        summary: result.summary ?? '',
+        key_points: result.key_points ?? [],
+        action_items: result.action_items ?? [],
+        glossary: result.glossary ?? [],
+        source_documents: result.source_documents ?? [],
+        total_pages: result.total_pages ?? 0,
+        chunk_count: result.chunk_count ?? 0,
+        image_notes: result.image_notes ?? [],
+        processing_notes: result.processing_notes ?? [],
+      })
+      triggerDownload(blob, filename)
+    } catch (e) {
+      setExportError(e instanceof Error ? e.message : 'Export failed')
+    } finally {
+      setExportBusy(null)
+    }
+  }
+
+  const nSelected = resolvedIds().length
+
   return (
-    <>
+    <div className="studio-route summarize-page">
       <h1 className="page-title">Summarize</h1>
       <p className="page-sub">
-        Turn a PDF, Word file, or other supported text into a structured summary. Requires <code>GROQ_API_KEY</code> on
-        the API.
+        Turn one or more supported files into a structured summary. The API needs <code>GROQ_API_KEY</code> in{' '}
+        <code>.env</code>.
       </p>
 
-      <DocPicker value={docId} onChange={setDocId} accept=".pdf,.docx,.pptx,.txt,.md" />
+      <div className="studio-sheet">
+        <div className="studio-sheet__grid">
+          <div className="studio-main">
+          <div className="studio-panel">
+            <h2>Primary document</h2>
+            <p className="summarize-lede">
+              Upload in the <strong>Library</strong> if needed, then choose the file that anchors this summary.
+            </p>
+            <DocPicker
+              value={docId}
+              onChange={(id) => {
+                setDocId(id)
+                setExtraIds((prev) => {
+                  if (!id) return new Set()
+                  const next = new Set(prev)
+                  next.delete(id)
+                  return next
+                })
+              }}
+              accept=".pdf,.docx,.pptx,.txt,.md"
+            />
+          </div>
 
-      <div className="panel">
-        <h2 style={{ margin: '0 0 1rem', fontSize: '1.05rem' }}>2. Options</h2>
-        <div className="field">
-          <label htmlFor="len">Length</label>
-          <select id="len" value={length} onChange={(e) => setLength(e.target.value)}>
-            <option value="short">Short</option>
-            <option value="medium">Medium</option>
-            <option value="long">Long</option>
-          </select>
+          <div className="studio-panel">
+            <h2>Merge more from the shelf</h2>
+            <p className="summarize-lede" style={{ marginBottom: '0.65rem' }}>
+              Optional: include up to {MAX_DOCS - 1} additional files in one run.
+            </p>
+            <button type="button" className="btn btn--ghost" onClick={() => void refreshShelf()}>
+              Refresh shelf
+            </button>
+            {shelf.length === 0 ? (
+              <p style={{ color: 'var(--ink-soft)', margin: 0 }}>No documents on the shelf yet.</p>
+            ) : (
+              <div className="summarize-shelf">
+                <ul>
+                  {shelf.map((d) => {
+                    const isPrimary = d.document_id === docId
+                    const checked = isPrimary || extraIds.has(d.document_id)
+                    const disabled = isPrimary ? true : !docId
+                    return (
+                      <li key={d.document_id}>
+                        <label>
+                          <input
+                            type="checkbox"
+                            checked={checked}
+                            disabled={disabled}
+                            onChange={() => {
+                              if (isPrimary) return
+                              toggleExtra(d.document_id)
+                            }}
+                          />
+                          <span className="summarize-shelf__meta">
+                            <strong>{d.title}</strong>{' '}
+                            <code>{d.document_id}</code>
+                            {isPrimary ? (
+                              <span style={{ color: 'var(--ink-soft)', fontSize: '0.86rem' }}> — primary</span>
+                            ) : null}
+                          </span>
+                        </label>
+                      </li>
+                    )
+                  })}
+                </ul>
+              </div>
+            )}
+          </div>
+          </div>
+
+        <aside className="studio-aside">
+          <div>
+            <span className="summarize-field-label">Summary length</span>
+            <div className="summarize-length" role="group" aria-label="Summary length">
+              {LENGTH_OPTS.map((opt) => (
+                <button
+                  key={opt.id}
+                  type="button"
+                  className={length === opt.id ? 'is-on' : ''}
+                  onClick={() => setLength(opt.id)}
+                >
+                  {opt.label}
+                  <span className="summarize-length-hint">{opt.hint}</span>
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <div className="summarize-stat">
+            <span>Documents in this run</span>
+            <strong>
+              {nSelected} / {MAX_DOCS}
+            </strong>
+          </div>
+
+          <button
+            type="button"
+            className="btn btn--accent summarize-run"
+            disabled={loading || !docId.trim()}
+            onClick={() => void run()}
+          >
+            {loading ? 'Summarizing…' : 'Generate summary'}
+          </button>
+        </aside>
         </div>
-        <button type="button" className="btn btn--accent" disabled={loading || !docId} onClick={() => void run()}>
-          {loading ? 'Summarizing…' : 'Generate summary'}
-        </button>
       </div>
 
       {error && <div className="error">{error}</div>}
 
       {result && (
-        <div className="panel" style={{ marginTop: '1.25rem' }}>
-          <h2 style={{ margin: '0 0 1rem', fontSize: '1.15rem' }}>Summary</h2>
-          {result.summary && (
-            <p style={{ lineHeight: 1.65, whiteSpace: 'pre-wrap' }}>{result.summary}</p>
-          )}
-          {result.key_points && result.key_points.length > 0 && (
-            <>
-              <h3 style={{ fontSize: '1rem', marginTop: '1.25rem' }}>Key points</h3>
-              <ul style={{ lineHeight: 1.5 }}>
-                {result.key_points.map((k, i) => (
-                  <li key={i}>{k}</li>
-                ))}
-              </ul>
-            </>
-          )}
-          {result.action_items && result.action_items.length > 0 && (
-            <>
-              <h3 style={{ fontSize: '1rem', marginTop: '1rem' }}>Action items</h3>
-              <ul>
-                {result.action_items.map((k, i) => (
-                  <li key={i}>{k}</li>
-                ))}
-              </ul>
-            </>
-          )}
-          {result.processing_notes && result.processing_notes.length > 0 && (
-            <p style={{ fontSize: '0.85rem', color: 'var(--ink-soft)', marginTop: '1rem' }}>
-              {result.processing_notes.join(' ')}
-            </p>
-          )}
+        <div className="studio-sheet studio-sheet--spaced studio-sheet--flat studio-results">
+          <div className="studio-results__head studio-results__head--row">
+            <h2>Summary output</h2>
+            <div className="studio-results__actions">
+              <button
+                type="button"
+                className="btn btn--primary"
+                disabled={exportBusy !== null}
+                onClick={() => void exportSummary('docx')}
+              >
+                {exportBusy === 'docx' ? 'Preparing…' : 'Word'}
+              </button>
+              <button
+                type="button"
+                className="btn btn--ghost"
+                disabled={exportBusy !== null}
+                onClick={() => void exportSummary('pdf')}
+              >
+                {exportBusy === 'pdf' ? 'Preparing…' : 'PDF'}
+              </button>
+            </div>
+          </div>
+          <div className="studio-results__body summarize-results__body">
+            {exportError && <div className="error" style={{ marginBottom: '1rem' }}>{exportError}</div>}
+            {result.source_documents && result.source_documents.length > 0 && (
+              <p className="summarize-results__sources">
+                <strong style={{ color: 'var(--sea)' }}>Sources</strong> · {result.source_documents.join(' · ')}
+                {typeof result.total_pages === 'number' ? ` · ~${result.total_pages} pages (declared)` : null}
+              </p>
+            )}
+            {result.summary && <p className="summarize-prose">{result.summary}</p>}
+            {result.key_points && result.key_points.length > 0 && (
+              <>
+                <h3>Key points</h3>
+                <ul>
+                  {result.key_points.map((k, i) => (
+                    <li key={i}>{k}</li>
+                  ))}
+                </ul>
+              </>
+            )}
+            {result.action_items && result.action_items.length > 0 && (
+              <>
+                <h3>Action items</h3>
+                <ul>
+                  {result.action_items.map((k, i) => (
+                    <li key={i}>{k}</li>
+                  ))}
+                </ul>
+              </>
+            )}
+            {result.glossary && result.glossary.length > 0 && (
+              <>
+                <h3>Glossary</h3>
+                <dl>
+                  {result.glossary.map((g, i) => (
+                    <div key={i}>
+                      <dt>{g.term}</dt>
+                      <dd>{g.definition}</dd>
+                    </div>
+                  ))}
+                </dl>
+              </>
+            )}
+            {result.image_notes && result.image_notes.length > 0 && (
+              <div className="summarize-footnote">
+                <strong style={{ color: 'var(--sea)' }}>Image notes</strong>
+                <ul style={{ marginTop: '0.35rem' }}>
+                  {result.image_notes.map((n, i) => (
+                    <li key={i}>{n}</li>
+                  ))}
+                </ul>
+              </div>
+            )}
+            {result.processing_notes && result.processing_notes.length > 0 && (
+              <p className="summarize-footnote">{result.processing_notes.join(' ')}</p>
+            )}
+          </div>
         </div>
       )}
-    </>
+    </div>
   )
 }

@@ -95,10 +95,11 @@ def chunk_document(document: ParsedDocument) -> List[RAGChunk]:
         image_parts = []
         if image.caption:
             image_parts.append(f"Caption: {image.caption}")
-        if image.description:
-            image_parts.append(f"Description: {image.description}")
-        elif image.asset_path:
-            image_parts.append("Description: Visual asset extracted, but no OCR text was available.")
+        desc = getattr(image, "description", None) or getattr(image, "alt_text", None)
+        if desc:
+            image_parts.append(f"Description: {desc}")
+        elif getattr(image, "path", None):
+            image_parts.append("Visual asset extracted, but no caption or OCR text was stored for this image.")
         image_text = "\n".join(image_parts).strip()
         if not image_text:
             continue

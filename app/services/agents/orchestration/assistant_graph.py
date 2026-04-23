@@ -27,6 +27,12 @@ _retriever: Retriever | None = None
 _compiled_graph: Any = None
 
 
+def invalidate_retriever_cache() -> None:
+    """Call after reindex/upload so the next dialogue uses a fresh vector store (not a stale in-memory snapshot)."""
+    global _retriever
+    _retriever = None
+
+
 def _get_retriever() -> Retriever | None:
     global _retriever
     if _retriever is None:
@@ -170,12 +176,22 @@ async def node_slides(state: TeachingAssistantState) -> dict[str, Any]:
             "error": f"Document '{did}' not found.",
         }
 
-    result = await run_slides(
-        doc,
-        n_slides=int(state.get("n_slides") or 5),
-        generate_images=False,
-        max_generated_images=0,
-    )
+    try:
+        result = await run_slides(
+            doc,
+            n_slides=int(state.get("n_slides") or 5),
+            template="academic_default",
+            generate_images=True,
+            max_generated_images=min(max(int(state.get("n_slides") or 5), 1), 20),
+        )
+    except RuntimeError as exc:
+        return {
+            "answer": "",
+            "sources": [],
+            "processing_notes": [],
+            "raw_result": None,
+            "error": str(exc),
+        }
     data = result.model_dump()
     title = data.get("title") or "Slides"
     return {
@@ -207,9 +223,22 @@ async def node_quiz(state: TeachingAssistantState) -> dict[str, Any]:
             "error": f"Document '{did}' not found.",
         }
 
+    n_mcq_raw = state.get("n_mcq")
+    n_short_raw = state.get("n_short_answer")
+    if n_mcq_raw is not None or n_short_raw is not None:
+        n_mcq = max(0, min(20, int(n_mcq_raw or 0)))
+        n_short = max(0, min(20, int(n_short_raw or 0)))
+    else:
+        total = max(1, min(25, int(state.get("n_questions") or 5)))
+        n_mcq = min(total, (total * 3 + 2) // 5)
+        n_short = total - n_mcq
+    if n_mcq + n_short < 1:
+        n_mcq, n_short = 3, 2
+
     result = await run_quiz(
         doc,
-        n_questions=int(state.get("n_questions") or 5),
+        n_mcq=n_mcq,
+        n_short_answer=n_short,
         difficulty=str(state.get("quiz_difficulty") or "medium"),
     )
     data = result.model_dump()

@@ -1,3 +1,18 @@
+# Atelier (Vite + React)
+
+## Run (dev)
+
+From this `frontend/` folder:
+
+```bash
+npm install
+npm run dev
+```
+
+Use `VITE_API_URL` in `.env.local` (see `.env.example`) so the UI points at your FastAPI instance. Full stack steps (venv, Uvicorn, ports) are in the **repository root** [README.md](../README.md#running-locally).
+
+---
+
 # React + TypeScript + Vite
 
 This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import List
+from typing import List, Optional, Set
 
 from app.models.rag import RAGChunk, RetrievalResult
 from app.services.knowledge.embeddings import cosine_similarity, embed_text
@@ -61,21 +61,51 @@ class LocalVectorStore:
         self._save()
         return len(chunks)
 
-    def similarity_search(self, query: str, top_k: int = 3) -> List[RetrievalResult]:
+    def similarity_search(
+        self,
+        query: str,
+        top_k: int = 3,
+        document_ids: Optional[List[str]] = None,
+    ) -> List[RetrievalResult]:
         query_embedding = embed_text(query)
         ranked: List[RetrievalResult] = []
+        allowed: Optional[Set[str]] = None
+        if document_ids:
+            allowed = {d.strip() for d in document_ids if d and str(d).strip()}
 
         for record in self._records:
+            chunk_payload = record["chunk"]
+            doc_id = chunk_payload.get("document_id")
+            if allowed is not None and doc_id not in allowed:
+                continue
             score = cosine_similarity(query_embedding, record["embedding"])
             if score <= 0:
                 continue
 
             ranked.append(
                 RetrievalResult(
-                    chunk=RAGChunk(**record["chunk"]),
+                    chunk=RAGChunk(**chunk_payload),
                     score=score,
                 )
             )
 
         ranked.sort(key=lambda item: item.score, reverse=True)
+
+        # Scoped chat: bag-of-token overlap can be zero for short/generic questions vs long chunks, or after
+        # legacy empty embeddings; still return the beginning of the document so the LLM has context.
+        if not ranked and allowed is not None and len(allowed) > 0:
+            fallback: List[RetrievalResult] = []
+            for record in self._records:
+                chunk_payload = record["chunk"]
+                if chunk_payload.get("document_id") not in allowed:
+                    continue
+                fallback.append(
+                    RetrievalResult(
+                        chunk=RAGChunk(**chunk_payload),
+                        score=1e-6,
+                    )
+                )
+            fallback.sort(key=lambda item: item.chunk.chunk_index)
+            return fallback[:top_k]
+
         return ranked[:top_k]
