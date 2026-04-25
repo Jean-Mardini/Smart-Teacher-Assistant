@@ -426,6 +426,11 @@ with summary_tab:
                 for item in result["action_items"]:
                     st.write(f"- {item}")
 
+            if result.get("formulas"):
+                st.markdown("### Formulas")
+                for expr in result["formulas"]:
+                    st.code(expr, language=None)
+
             st.markdown("### Glossary")
             if result.get("glossary"):
                 for item in result["glossary"]:

@@ -45,6 +45,12 @@ def _blocks_from_payload(data: dict[str, Any]) -> list[tuple[str, str]]:
         for k in action_items:
             out.append(("li", str(k)))
 
+    formulas = data.get("formulas") or []
+    if isinstance(formulas, list) and formulas:
+        out.append(("h", "Formulas"))
+        for f in formulas:
+            out.append(("li", str(f)))
+
     glossary = data.get("glossary") or []
     if isinstance(glossary, list) and glossary:
         out.append(("h", "Glossary"))

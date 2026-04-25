@@ -9,6 +9,7 @@ import fitz
 from langdetect import detect
 
 from app.models.documents import DocumentMetadata, ParsedDocument
+from .formula_ocr import enrich_pdf_images_with_formula_latex
 from .pdf_parser import extract_pdf_text, extract_pdf_images
 from .docx_parser import extract_docx_text
 from .pptx_parser import extract_pptx_text
@@ -18,6 +19,16 @@ from .structure_extraction import split_into_sections
 _SUPPORTED = {".pdf", ".docx", ".pptx"}
 
 logger = logging.getLogger(__name__)
+
+
+def _reload_project_dotenv() -> None:
+    """Re-read ``.env`` so flags like ``PDF_FORMULA_OCR`` apply without restarting the API."""
+    try:
+        from dotenv import load_dotenv
+    except ImportError:
+        return
+    root = Path(__file__).resolve().parents[3]
+    load_dotenv(root / ".env", override=True)
 
 
 # ---------------------------------------------------------------------------
@@ -122,6 +133,7 @@ def process_document(
     -------
     :class:`~app.models.documents.ParsedDocument`
     """
+    _reload_project_dotenv()
     filename = os.path.basename(filepath)
     ext = os.path.splitext(filepath)[1].lower()
 
@@ -162,6 +174,8 @@ def process_document(
         tables                         = fut_tables.result()
         line_meta                      = fut_spans.result()
         images                         = fut_images.result()
+        if images:
+            images = enrich_pdf_images_with_formula_latex(images)
 
     elif ext == ".docx":
         pages, full_text, tables, images = extract_docx_text(filepath, document_id=document_id)

@@ -95,6 +95,7 @@ class SummaryResult(BaseModel):
     summary: str
     key_points: List[str]
     action_items: List[str] = Field(default_factory=list)
+    formulas: List[str] = Field(default_factory=list)
     glossary: List[GlossaryItem] = Field(default_factory=list)
     source_documents: List[str] = Field(default_factory=list)
     total_pages: int = 0
@@ -110,6 +111,7 @@ class SummaryExportRequest(BaseModel):
     summary: str = ""
     key_points: List[str] = Field(default_factory=list)
     action_items: List[str] = Field(default_factory=list)
+    formulas: List[str] = Field(default_factory=list)
     glossary: List[GlossaryItem] = Field(default_factory=list)
     source_documents: List[str] = Field(default_factory=list)
     total_pages: int = 0

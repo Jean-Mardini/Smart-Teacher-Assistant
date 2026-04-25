@@ -9,6 +9,7 @@ type SummaryResult = {
   summary?: string
   key_points?: string[]
   action_items?: string[]
+  formulas?: string[]
   glossary?: GlossaryItem[]
   source_documents?: string[]
   total_pages?: number
@@ -100,6 +101,7 @@ export function SummarizePage() {
         summary: result.summary ?? '',
         key_points: result.key_points ?? [],
         action_items: result.action_items ?? [],
+        formulas: result.formulas ?? [],
         glossary: result.glossary ?? [],
         source_documents: result.source_documents ?? [],
         total_pages: result.total_pages ?? 0,
@@ -281,6 +283,18 @@ export function SummarizePage() {
                 <ul>
                   {result.action_items.map((k, i) => (
                     <li key={i}>{k}</li>
+                  ))}
+                </ul>
+              </>
+            )}
+            {result.formulas && result.formulas.length > 0 && (
+              <>
+                <h3>Formulas</h3>
+                <ul className="summarize-formulas">
+                  {result.formulas.map((f, i) => (
+                    <li key={i}>
+                      <code>{f}</code>
+                    </li>
                   ))}
                 </ul>
               </>
