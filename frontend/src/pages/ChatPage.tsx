@@ -11,7 +11,7 @@ type ChatResponse = {
 export function ChatPage() {
   const [question, setQuestion] = useState('')
   const [ids, setIds] = useState('')
-  const [pickId, setPickId] = useState('')
+  const [pickIds, setPickIds] = useState<string[]>([])
   const [length, setLength] = useState('medium')
   const [result, setResult] = useState<ChatResponse | null>(null)
   const [loading, setLoading] = useState(false)
@@ -35,7 +35,7 @@ export function ChatPage() {
           temperature: 0.2,
           document_ids,
         }),
-      })
+      }, 120_000)
       setResult(res)
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Request failed')
@@ -54,10 +54,10 @@ export function ChatPage() {
       {error && <div className="error" style={{ whiteSpace: 'pre-wrap' }}>{error}</div>}
 
       <DocPicker
-        value={pickId}
-        onChange={(id) => {
-          setPickId(id)
-          setIds(id)
+        value={pickIds}
+        onChange={(ids) => {
+          setPickIds(ids)
+          setIds(ids.join(', '))
         }}
         accept=".pdf,.docx,.pptx,.txt,.md"
       />

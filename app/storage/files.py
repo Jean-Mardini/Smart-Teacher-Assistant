@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+import shutil
 from pathlib import Path
 import re
 
@@ -26,9 +28,31 @@ def get_knowledge_base_dir() -> Path:
 
 
 def get_evaluation_dir() -> Path:
-    """Kristy's Flexible Grader: config, presets, and history under data/evaluation/."""
-    path = settings.data_dir / "evaluation"
+    """Kristy's Flexible Grader storage, kept outside the repo so reload mode stays stable."""
+    explicit = os.getenv("EVALUATION_DATA_DIR", "").strip()
+    if explicit:
+        path = Path(explicit)
+    else:
+        base = (
+            os.getenv("LOCALAPPDATA")
+            or os.getenv("APPDATA")
+            or str(Path.home() / "AppData" / "Local")
+        )
+        path = Path(base) / "SmartTeacherAssistant" / "evaluation"
+
     path.mkdir(parents=True, exist_ok=True)
+
+    legacy = settings.data_dir / "evaluation"
+    if legacy != path and legacy.exists():
+        for name in ("config.json", "rubric_presets.json", "history.jsonl"):
+            src = legacy / name
+            dst = path / name
+            if src.exists() and not dst.exists():
+                try:
+                    shutil.copy2(src, dst)
+                except Exception:
+                    pass
+
     return path
 
 

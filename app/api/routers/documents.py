@@ -1,18 +1,36 @@
-"""Routers for document-related endpoints (upload, list, inspect)."""
+"""Routers for document-related endpoints (upload, list, inspect, delete)."""
 
 from __future__ import annotations
 
+import asyncio
+import hashlib
 from pathlib import Path
 
 from fastapi import APIRouter, File, HTTPException, UploadFile
 
 from app.models.documents import DocumentUploadResult, LocalDocumentInfo
-from app.services.knowledge.indexing_pipeline import list_local_document_infos_light
+from app.services.knowledge.indexing_pipeline import (
+    invalidate_doc_cache,
+    list_local_document_infos_light,
+    resolve_path_for_document_id,
+)
 from app.storage.files import get_knowledge_base_dir, sanitize_filename
 
 router = APIRouter(prefix="/documents", tags=["documents"])
 
 ALLOWED_EXTENSIONS = {".txt", ".md", ".json", ".pdf", ".docx", ".pptx"}
+
+
+def _find_duplicate(directory: Path, content_hash: str) -> Path | None:
+    """Return path of an existing file whose content matches the given SHA-256 hash."""
+    for f in directory.iterdir():
+        if f.is_file():
+            try:
+                if hashlib.sha256(f.read_bytes()).hexdigest() == content_hash:
+                    return f
+            except Exception:
+                continue
+    return None
 
 
 @router.get("/local", response_model=list[LocalDocumentInfo])
@@ -38,6 +56,21 @@ async def upload_documents(files: list[UploadFile] = File(...)):
                 detail=f"Unsupported file type for '{original_name}'.",
             )
 
+        content = await upload.read()
+        content_hash = hashlib.sha256(content).hexdigest()
+
+        # Skip saving if an identical file already exists in the library
+        existing = await asyncio.to_thread(_find_duplicate, knowledge_base_dir, content_hash)
+        if existing is not None:
+            results.append(
+                DocumentUploadResult(
+                    filename=existing.name,
+                    stored_path=str(existing),
+                    filetype=existing.suffix.lower().lstrip("."),
+                )
+            )
+            continue
+
         safe_name = sanitize_filename(original_name)
         target_path = knowledge_base_dir / safe_name
 
@@ -48,8 +81,8 @@ async def upload_documents(files: list[UploadFile] = File(...)):
             target_path = knowledge_base_dir / f"{stem}_{counter}{ext}"
             counter += 1
 
-        content = await upload.read()
-        target_path.write_bytes(content)
+        await asyncio.to_thread(target_path.write_bytes, content)
+        invalidate_doc_cache()
 
         results.append(
             DocumentUploadResult(
@@ -60,3 +93,15 @@ async def upload_documents(files: list[UploadFile] = File(...)):
         )
 
     return results
+
+
+@router.delete("/{document_id}", status_code=204)
+async def delete_document(document_id: str):
+    path = await asyncio.to_thread(resolve_path_for_document_id, document_id)
+    if path is None:
+        raise HTTPException(status_code=404, detail=f"Document '{document_id}' not found.")
+    try:
+        await asyncio.to_thread(path.unlink)
+        invalidate_doc_cache()
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to delete file: {exc}")

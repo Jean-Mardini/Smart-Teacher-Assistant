@@ -1,6 +1,7 @@
 import { Navigate, Route, Routes } from 'react-router-dom'
 import { Shell } from './components/Shell'
 import { ChatPage } from './pages/ChatPage'
+import { GeneratePage } from './pages/GeneratePage'
 import { GradePage } from './pages/GradePage'
 import { HomePage } from './pages/HomePage'
 import { LibraryPage } from './pages/LibraryPage'
@@ -18,6 +19,7 @@ export default function App() {
         <Route path="summarize" element={<SummarizePage />} />
         <Route path="slides" element={<SlidesPage />} />
         <Route path="quiz" element={<QuizPage />} />
+        <Route path="generate" element={<GeneratePage />} />
         <Route path="grade" element={<GradePage />} />
         <Route path="studio" element={<Navigate to="/summarize" replace />} />
         <Route path="*" element={<Navigate to="/" replace />} />

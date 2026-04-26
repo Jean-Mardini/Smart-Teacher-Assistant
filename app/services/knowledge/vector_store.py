@@ -42,6 +42,9 @@ class LocalVectorStore:
     def document_count(self) -> int:
         return len({record["chunk"]["document_id"] for record in self._records})
 
+    def indexed_document_ids(self) -> set[str]:
+        return {record["chunk"]["document_id"] for record in self._records}
+
     def add_chunks(self, chunks: List[RAGChunk]) -> int:
         document_ids = {chunk.document_id for chunk in chunks}
         self._records = [
@@ -61,11 +64,19 @@ class LocalVectorStore:
         self._save()
         return len(chunks)
 
-    def similarity_search(self, query: str, top_k: int = 3) -> List[RetrievalResult]:
+    def similarity_search(
+        self,
+        query: str,
+        top_k: int = 3,
+        document_ids: List[str] | None = None,
+    ) -> List[RetrievalResult]:
         query_embedding = embed_text(query)
         ranked: List[RetrievalResult] = []
+        allowed_ids = set(document_ids or [])
 
         for record in self._records:
+            if allowed_ids and record["chunk"]["document_id"] not in allowed_ids:
+                continue
             score = cosine_similarity(query_embedding, record["embedding"])
             if score <= 0:
                 continue

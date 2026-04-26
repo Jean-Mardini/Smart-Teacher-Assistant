@@ -12,7 +12,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from starlette.requests import Request
 
-from app.api.routers import agents, chat, documents, evaluation, graph, rag
+from app.api.routers import agents, chat, documents, evaluation, generator, graph, rag
 from app.services.llm.groq_client import LLMConfigurationError
 from app.storage.files import ensure_storage_dirs
 
@@ -27,6 +27,8 @@ app.add_middleware(
     allow_origins=[
         "http://localhost:5173",
         "http://127.0.0.1:5173",
+        "http://localhost:5174",
+        "http://127.0.0.1:5174",
         "http://localhost:3000",
         "http://127.0.0.1:3000",
         "http://localhost:8501",
@@ -59,3 +61,4 @@ app.include_router(documents.router)
 app.include_router(rag.router)
 app.include_router(graph.router)
 app.include_router(evaluation.router, prefix="/evaluation", tags=["evaluation"])
+app.include_router(generator.router)

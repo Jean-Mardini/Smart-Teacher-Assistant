@@ -1,0 +1,24 @@
+You should work on two main aspects: the theory behind your database (structure/architecture/deployment/replication/consistency/availability, etc.) as well as the practical aspect (installation, use).
+
+For example. those who have chosen to work on MongoDB, its aggregation framework is also interesting to cover, as well as recent Streaming data support, Time Series, etc....MongoDB Atlas for cloud deployment, Compass or Studio3T are also intersting to use and cover. Finally, you can also address the challenge of using your database in the AI context.
+
+You must explain how to deploy, configure and use your database in a Big Data context (High Volume/High Velocity and Variety).
+
+And as proof of concept, you should show how does your database tackle all these challenges.
+
+You must therefore upload:
+
+1- A 15-minute PowerPoint presentation (with speaker notes) explaining the theory followed by a tutorial on how to install and use with examples to follow //This is required if we don't get back to the campus
+
+2- You will be presenting your work to the class and we will be doing the tutorials you provide together.
+
+3- A detailed pdf report covering all the details and containing all the references to the material you used. 
+
+- You can find free online courses on the NoSQL database you have chosen, and many tutorials. Plagiarism will be severely sanctioned; you only need to cite your references, so do not forget to add a references section at the end of your presentation. 
+
+- The names and the contribution of each student in the group should also be clearly mentioned at the beginning of your report and presentation.
+
+- The use of AI should be mentioned, editing and verification should always be done on the generated content, since it may contain errors.
+
+- Work should be equally divided among each student in the group, and it should be clearly defined.
+

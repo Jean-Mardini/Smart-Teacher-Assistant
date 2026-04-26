@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 from pathlib import Path
-from typing import List
+from typing import List, Optional
+
+logger = logging.getLogger(__name__)
 
 from app.models.documents import DocumentMetadata, LocalDocumentInfo, ParsedDocument, Section
 from app.models.rag import IndexingResult
@@ -139,15 +142,38 @@ def load_local_documents() -> List[ParsedDocument]:
     return documents
 
 
-def get_local_document_by_id(document_id: str) -> ParsedDocument | None:
-    """Parse **only** the matching file (fast path — does not parse the whole library)."""
+# ---------------------------------------------------------------------------
+# Document cache: mtime-keyed so stale entries are never served
+# ---------------------------------------------------------------------------
+_doc_cache: dict[str, tuple[float, "ParsedDocument"]] = {}
+
+
+def get_local_document_by_id(document_id: str) -> Optional[ParsedDocument]:
+    """Return a parsed document by ID, using a mtime-based in-process cache."""
     path = resolve_path_for_document_id(document_id)
     if path is None:
         return None
     try:
-        return parse_local_document(path)
+        mtime = path.stat().st_mtime
+        cached = _doc_cache.get(document_id)
+        if cached and cached[0] == mtime:
+            return cached[1]
+        doc = parse_local_document(path)
+        _doc_cache[document_id] = (mtime, doc)
+        logger.debug("Parsed and cached document %s", document_id)
+        return doc
     except Exception:
+        logger.warning("Failed to parse document %s", document_id, exc_info=True)
         return None
+
+
+def invalidate_doc_cache(document_id: Optional[str] = None) -> None:
+    """Evict one entry (or the whole cache when called with no argument)."""
+    if document_id is None:
+        _doc_cache.clear()
+        logger.debug("Document cache cleared")
+    else:
+        _doc_cache.pop(document_id, None)
 
 
 def index_knowledge_base(

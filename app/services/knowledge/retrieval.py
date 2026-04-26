@@ -17,9 +17,18 @@ class Retriever:
             index_knowledge_base(clear_first=True)
             self.store = LocalVectorStore()
 
-    def retrieve(self, query: str, top_k: int | None = None) -> List[RAGChunk]:
+    def retrieve(
+        self,
+        query: str,
+        top_k: int | None = None,
+        document_ids: List[str] | None = None,
+    ) -> List[RAGChunk]:
         top_k = top_k or settings.default_top_k
-        results = self.store.similarity_search(query=query, top_k=top_k)
+        results = self.store.similarity_search(
+            query=query,
+            top_k=top_k,
+            document_ids=document_ids,
+        )
         return [result.chunk for result in results]
 
     def refresh_index(

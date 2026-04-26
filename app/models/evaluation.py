@@ -23,10 +23,36 @@ class EvaluationStatusResponse(BaseModel):
     )
 
 
+class EvaluationConfigResponse(BaseModel):
+    """Public evaluation config summary for the frontend."""
+
+    has_api_key: bool = False
+    api_key_preview: str = ""
+    model: str = ""
+
+
+class EvaluationConfigUpdateRequest(BaseModel):
+    """Save or clear Groq-backed evaluation settings."""
+
+    groq_api_key: Optional[str] = None
+    model: Optional[str] = None
+
+
+class SourceTextRequest(BaseModel):
+    text: str = ""
+    document_ids: List[str] = Field(default_factory=list)
+
+
+class SourceTextResponse(BaseModel):
+    text: str = ""
+    documents: List[Dict[str, str]] = Field(default_factory=list)
+
+
 class RubricFromTextRequest(BaseModel):
     """Generate rubric items from assignment or teacher-key text."""
 
-    text: str = Field(..., description="Assignment text or teacher key text.")
+    text: str = Field("", description="Assignment text or teacher key text.")
+    document_ids: List[str] = Field(default_factory=list)
     total_points: int = Field(100, ge=1, le=2000)
 
 
@@ -41,11 +67,15 @@ class RubricGenerationResponse(BaseModel):
 class GradeSubmissionRequest(BaseModel):
     """Grade one submission against rubric items."""
 
-    submission_text: str
+    submission_text: str = ""
+    submission_document_ids: List[str] = Field(default_factory=list)
     items: List[Dict[str, Any]]
     teacher_key_text: str = ""
+    teacher_key_document_ids: List[str] = Field(default_factory=list)
     reference_text: str = ""
+    reference_document_ids: List[str] = Field(default_factory=list)
     result_title: str = "Submission"
+    save_history: bool = True
 
 
 class GradeSubmissionResponse(BaseModel):
@@ -57,3 +87,60 @@ class GradeSubmissionResponse(BaseModel):
 
 class HistoryListResponse(BaseModel):
     records: List[Dict[str, Any]]
+    batches: List[Dict[str, Any]] = Field(default_factory=list)
+    stats: Dict[str, Any] = Field(default_factory=dict)
+
+
+class BatchSubmissionInput(BaseModel):
+    title: str = "Submission"
+    submission_text: str = ""
+    submission_document_ids: List[str] = Field(default_factory=list)
+
+
+class BatchGradeRequest(BaseModel):
+    submissions: List[BatchSubmissionInput] = Field(default_factory=list)
+    items: List[Dict[str, Any]] = Field(default_factory=list)
+    teacher_key_text: str = ""
+    teacher_key_document_ids: List[str] = Field(default_factory=list)
+    reference_text: str = ""
+    reference_document_ids: List[str] = Field(default_factory=list)
+    batch_name: str = ""
+    save_history: bool = True
+
+
+class BatchGradeResponse(BaseModel):
+    records: List[Dict[str, Any]] = Field(default_factory=list)
+    batch_id: str = ""
+    batch_name: str = ""
+    stats: Dict[str, Any] = Field(default_factory=dict)
+
+
+class EvaluationPresetSaveRequest(BaseModel):
+    origin: str = "assignment"
+    items: List[Dict[str, Any]] = Field(default_factory=list)
+    total_points: int = Field(100, ge=1, le=2000)
+
+
+class EvaluationPresetsResponse(BaseModel):
+    presets: Dict[str, Dict[str, Any]] = Field(default_factory=dict)
+
+
+class ParsedUploadText(BaseModel):
+    name: str
+    text: str
+
+
+class ParsedUploadListResponse(BaseModel):
+    items: List[ParsedUploadText] = Field(default_factory=list)
+
+
+class ExportSingleRequest(BaseModel):
+    record: Dict[str, Any]
+
+
+class ExportBatchRequest(BaseModel):
+    records: List[Dict[str, Any]] = Field(default_factory=list)
+
+
+class HistoryRecordUpdateRequest(BaseModel):
+    record: Dict[str, Any]

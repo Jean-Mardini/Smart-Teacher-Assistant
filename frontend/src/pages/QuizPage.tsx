@@ -16,7 +16,7 @@ type QuizResult = {
 }
 
 export function QuizPage() {
-  const [docId, setDocId] = useState('')
+  const [docIds, setDocIds] = useState<string[]>([])
   const [nQuestions, setNQuestions] = useState(5)
   const [difficulty, setDifficulty] = useState('medium')
   const [loading, setLoading] = useState(false)
@@ -24,9 +24,8 @@ export function QuizPage() {
   const [result, setResult] = useState<QuizResult | null>(null)
 
   async function run() {
-    const id = docId.trim()
-    if (!id) {
-      setError('Choose a document above.')
+    if (!docIds.length) {
+      setError('Choose at least one document above.')
       return
     }
     setLoading(true)
@@ -36,11 +35,11 @@ export function QuizPage() {
       const res = await apiJson<QuizResult>('/agents/quiz', {
         method: 'POST',
         body: JSON.stringify({
-          document_id: id,
+          document_id: docIds[0],
           n_questions: nQuestions,
           difficulty,
         }),
-      })
+      }, 120_000)
       setResult(res)
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Failed')
@@ -54,7 +53,7 @@ export function QuizPage() {
       <h1 className="page-title">Quiz</h1>
       <p className="page-sub">Generate quiz questions from one document.</p>
 
-      <DocPicker value={docId} onChange={setDocId} accept=".pdf,.docx,.pptx,.txt,.md" />
+      <DocPicker value={docIds} onChange={setDocIds} accept=".pdf,.docx,.pptx,.txt,.md" />
 
       <div className="panel">
         <h2 style={{ margin: '0 0 1rem', fontSize: '1.05rem' }}>2. Options</h2>
@@ -77,7 +76,7 @@ export function QuizPage() {
             <option value="hard">Hard</option>
           </select>
         </div>
-        <button type="button" className="btn btn--accent" disabled={loading || !docId} onClick={() => void run()}>
+        <button type="button" className="btn btn--accent" disabled={loading || !docIds.length} onClick={() => void run()}>
           {loading ? 'Generating…' : 'Generate quiz'}
         </button>
       </div>

@@ -11,16 +11,15 @@ type SlideResult = {
 }
 
 export function SlidesPage() {
-  const [docId, setDocId] = useState('')
+  const [docIds, setDocIds] = useState<string[]>([])
   const [nSlides, setNSlides] = useState(5)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [result, setResult] = useState<SlideResult | null>(null)
 
   async function run() {
-    const id = docId.trim()
-    if (!id) {
-      setError('Choose a document above.')
+    if (!docIds.length) {
+      setError('Choose at least one document above.')
       return
     }
     setLoading(true)
@@ -30,12 +29,12 @@ export function SlidesPage() {
       const res = await apiJson<SlideResult>('/agents/slides', {
         method: 'POST',
         body: JSON.stringify({
-          document_id: id,
+          document_id: docIds[0],
           n_slides: nSlides,
           generate_images: false,
           max_generated_images: 0,
         }),
-      })
+      }, 120_000)
       setResult(res)
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Failed')
@@ -49,7 +48,7 @@ export function SlidesPage() {
       <h1 className="page-title">Slides</h1>
       <p className="page-sub">Generate a slide deck outline from one document (titles + bullets + speaker notes).</p>
 
-      <DocPicker value={docId} onChange={setDocId} accept=".pdf,.docx,.pptx,.txt,.md" />
+      <DocPicker value={docIds} onChange={setDocIds} accept=".pdf,.docx,.pptx,.txt,.md" />
 
       <div className="panel">
         <h2 style={{ margin: '0 0 1rem', fontSize: '1.05rem' }}>2. Options</h2>
@@ -64,7 +63,7 @@ export function SlidesPage() {
             onChange={(e) => setNSlides(Number(e.target.value))}
           />
         </div>
-        <button type="button" className="btn btn--accent" disabled={loading || !docId} onClick={() => void run()}>
+        <button type="button" className="btn btn--accent" disabled={loading || !docIds.length} onClick={() => void run()}>
           {loading ? 'Generating…' : 'Generate slides'}
         </button>
       </div>

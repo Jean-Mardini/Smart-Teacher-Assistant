@@ -10,16 +10,15 @@ type SummaryResult = {
 }
 
 export function SummarizePage() {
-  const [docId, setDocId] = useState('')
+  const [docIds, setDocIds] = useState<string[]>([])
   const [length, setLength] = useState('medium')
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [result, setResult] = useState<SummaryResult | null>(null)
 
   async function run() {
-    const id = docId.trim()
-    if (!id) {
-      setError('Choose a document above.')
+    if (!docIds.length) {
+      setError('Choose at least one document above.')
       return
     }
     setLoading(true)
@@ -28,8 +27,8 @@ export function SummarizePage() {
     try {
       const res = await apiJson<SummaryResult>('/agents/summarize', {
         method: 'POST',
-        body: JSON.stringify({ document_ids: [id], length }),
-      })
+        body: JSON.stringify({ document_ids: docIds, length }),
+      }, 180_000)
       setResult(res)
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Summarize failed')
@@ -42,11 +41,11 @@ export function SummarizePage() {
     <>
       <h1 className="page-title">Summarize</h1>
       <p className="page-sub">
-        Turn a PDF, Word file, or other supported text into a structured summary. Requires <code>GROQ_API_KEY</code> on
-        the API.
+        Turn a PDF, Word file, or other supported text into a structured summary. This uses the shared AI key saved in
+        the left sidebar.
       </p>
 
-      <DocPicker value={docId} onChange={setDocId} accept=".pdf,.docx,.pptx,.txt,.md" />
+      <DocPicker value={docIds} onChange={setDocIds} accept=".pdf,.docx,.pptx,.txt,.md" />
 
       <div className="panel">
         <h2 style={{ margin: '0 0 1rem', fontSize: '1.05rem' }}>2. Options</h2>
@@ -58,7 +57,7 @@ export function SummarizePage() {
             <option value="long">Long</option>
           </select>
         </div>
-        <button type="button" className="btn btn--accent" disabled={loading || !docId} onClick={() => void run()}>
+        <button type="button" className="btn btn--accent" disabled={loading || !docIds.length} onClick={() => void run()}>
           {loading ? 'Summarizing…' : 'Generate summary'}
         </button>
       </div>
