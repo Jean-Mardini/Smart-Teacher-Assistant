@@ -6,6 +6,15 @@ from typing import Any
 from urllib import error, request
 import uuid
 
+# Load `.env` from repo root (same as FastAPI) so HF_TOKEN / keys exist if anything imports app code locally.
+_PROJECT_ROOT = Path(__file__).resolve().parent
+try:
+    from dotenv import load_dotenv
+
+    load_dotenv(_PROJECT_ROOT / ".env")
+except ImportError:
+    pass
+
 import streamlit as st
 
 from app.services.agents.quiz_export import quiz_to_moodle_xml
@@ -93,6 +102,17 @@ def render_slide_images(result: dict[str, Any], slide: dict[str, Any]) -> None:
 
     if assets:
         st.image(assets, caption=captions, use_container_width=True)
+
+
+# Maps API slide template id -> Streamlit preview layout name used by render_slide_deck.
+_SLIDES_PREVIEW_LAYOUT = {
+    "academic_default": "Classic",
+    "minimal_clean": "Two-Column",
+    "workshop_interactive": "Lecture Notes",
+    "executive_summary": "Spotlight",
+    "deep_technical": "Classic",
+    "story_visual": "Spotlight",
+}
 
 
 def render_slide_deck(result: dict[str, Any], template: str) -> None:
@@ -406,6 +426,11 @@ with summary_tab:
                 for item in result["action_items"]:
                     st.write(f"- {item}")
 
+            if result.get("formulas"):
+                st.markdown("### Formulas")
+                for expr in result["formulas"]:
+                    st.code(expr, language=None)
+
             st.markdown("### Glossary")
             if result.get("glossary"):
                 for item in result["glossary"]:
@@ -441,36 +466,74 @@ with summary_tab:
 
 with slides_tab:
     st.subheader("Slide Generation")
-    st.caption("Slides are generated from the first selected document.")
+    st.caption("Create with AI: library document, pasted text, one-line prompt, or URL import (same API as the web app).")
+    slide_source_mode = st.radio(
+        "How to start",
+        ["Library document", "Paste text", "One-line prompt", "URL import"],
+        horizontal=True,
+        key="slides_source_mode",
+    )
     top_left, top_right = st.columns([1, 1])
     with top_left:
-        n_slides = st.slider("Number of slides", min_value=3, max_value=10, value=5)
+        n_slides = st.slider("Number of slides", min_value=3, max_value=20, value=5)
     with top_right:
         slide_template = st.selectbox(
-            "Slide template",
-            ["Classic", "Two-Column", "Spotlight", "Lecture Notes"],
+            "Slide template (LLM prompt)",
+            [
+                ("academic_default", "Default (modern deck)"),
+                ("minimal_clean", "Minimal & clean"),
+                ("workshop_interactive", "Workshop / interactive"),
+                ("executive_summary", "Executive summary"),
+                ("deep_technical", "Technical deep-dive"),
+                ("story_visual", "Story / keynote"),
+            ],
+            format_func=lambda x: x[1],
             index=0,
         )
-    image_left, image_mid, image_right = st.columns([1.1, 1.1, 1])
-    with image_left:
-        generate_slide_images = st.checkbox("Generate AI images", value=False)
-    with image_mid:
-        slide_image_style = st.selectbox(
-            "Image style",
-            ["educational illustration", "diagrammatic infographic", "photorealistic concept art"],
-            index=0,
-            disabled=not generate_slide_images,
-        )
-    with image_right:
-        max_generated_images = st.slider(
-            "AI images",
-            min_value=1,
-            max_value=5,
-            value=min(3, n_slides),
-            disabled=not generate_slide_images,
-        )
-    if generate_slide_images:
-        st.caption("Requires OPENAI_API_KEY on the backend. Generated images are saved locally and included in the PPTX.")
+    slide_image_style = st.selectbox(
+        "AI image art style (topic-based; one image per slide when an image API key is set on the backend)",
+        [
+            "vector_science",
+            "illustration",
+            "photo",
+            "abstract",
+            "3d",
+            "line_art",
+            "diagram",
+        ],
+        format_func=lambda x: {
+            "vector_science": "Science deck (vector)",
+            "illustration": "Illustration",
+            "photo": "Photo",
+            "abstract": "Abstract",
+            "3d": "3D",
+            "line_art": "Line art",
+            "diagram": "Diagram / infographic",
+        }.get(x, x),
+        index=0,
+    )
+    st.caption(
+        "Images are generated from each slide’s title and bullets (not from the slide layout). "
+        "Set HF_TOKEN, XAI_API_KEY, or OPENAI_API_KEY on the API server for real renders; otherwise placeholders may apply."
+    )
+
+    slides_payload: dict = {"n_slides": n_slides, "template": slide_template[0], "image_style": slide_image_style}
+    if slide_source_mode == "Library document":
+        slides_payload["document_id"] = primary_document_id
+    elif slide_source_mode == "Paste text":
+        pasted = st.text_area("Paste notes or outline", height=220, key="slides_paste_body")
+        title_opt = st.text_input("Deck title (optional)", "", key="slides_paste_title")
+        slides_payload["source_text"] = pasted or ""
+        if title_opt.strip():
+            slides_payload["source_title"] = title_opt.strip()
+    elif slide_source_mode == "One-line prompt":
+        slides_payload["source_text"] = st.text_input("One-line prompt", "", key="slides_prompt_line") or ""
+    else:
+        url = st.text_input("Page URL (https…)", "", key="slides_import_url")
+        title_opt = st.text_input("Deck title (optional)", "", key="slides_url_title")
+        slides_payload["source_url"] = url or ""
+        if title_opt.strip():
+            slides_payload["source_title"] = title_opt.strip()
 
     if st.button("Generate Slides", type="primary", key="slides_button"):
         with st.spinner("Generating slides..."):
@@ -478,13 +541,7 @@ with slides_tab:
                 api_post,
                 backend_url,
                 "/agents/slides",
-                {
-                    "document_id": primary_document_id,
-                    "n_slides": n_slides,
-                    "generate_images": generate_slide_images,
-                    "image_style": slide_image_style,
-                    "max_generated_images": int(max_generated_images),
-                },
+                slides_payload,
             )
 
         if api_error:
@@ -492,72 +549,116 @@ with slides_tab:
         else:
             st.session_state.slides_result = result
             st.session_state.slides_document_id = primary_document_id
+            st.session_state.slides_source_mode_saved = slide_source_mode
 
     if "slides_result" in st.session_state:
-        if st.session_state.get("slides_document_id") != primary_document_id:
+        lib_mismatch = st.session_state.get("slides_source_mode_saved") == "Library document" and (
+            st.session_state.get("slides_document_id") != primary_document_id
+        )
+        if lib_mismatch:
             st.info("Generate slides for the newly selected document to preview them here.")
         else:
-            render_slide_deck(st.session_state.slides_result, slide_template)
+            result = st.session_state.slides_result
+            proc = result.get("processing_notes") or []
+            local_ok = any(
+                ("Attached" in str(n) and "local slide illustration" in str(n))
+                or "local_placeholder" in str(n)
+                or ("not AI-generated" in str(n) and "PPTX" in str(n))
+                for n in proc
+            )
+            if not local_ok and any(
+                "No AI slide" in str(n)
+                or "No slide images were generated" in str(n)
+                or "OPENAI_API_KEY" in str(n)
+                or "XAI_API_KEY" in str(n)
+                or "HF_TOKEN" in str(n)
+                or "HUGGING_FACE" in str(n)
+                or "huggingface_hub" in str(n)
+                or "AI image generation failed" in str(n)
+                for n in proc
+            ):
+                st.warning(
+                    "Slide text was generated, but **API image models did not attach**. "
+                    "Set `HF_TOKEN`, `XAI_API_KEY`, or `OPENAI_API_KEY` and restart the API, "
+                    "or leave keys unset for **local placeholder** images (default). Details under Processing Notes."
+                )
+            preview = _SLIDES_PREVIEW_LAYOUT.get(slide_template[0], "Classic")
+            render_slide_deck(result, preview)
 
-            pptx_export = slide_deck_to_pptx_bytes(st.session_state.slides_result)
+            export_deck = dict(result)
+            export_deck.setdefault("template_used", slide_template[0])
+            export_deck.setdefault("template", slide_template[0])
+            pptx_export = slide_deck_to_pptx_bytes(export_deck)
+            pptx_name = f"{primary_document_id}_slides.pptx"
+
             st.download_button(
                 "Download PowerPoint (.pptx)",
                 data=pptx_export,
-                file_name=f"{primary_document_id}_slides.pptx",
+                file_name=pptx_name,
                 mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
                 key="download_slides_pptx",
             )
 
-            if st.session_state.slides_result.get("image_notes"):
+            if result.get("image_notes"):
                 st.markdown("### Image Notes")
-                for note in st.session_state.slides_result["image_notes"]:
+                for note in result["image_notes"]:
                     st.write(f"- {note}")
 
-            if st.session_state.slides_result.get("processing_notes"):
+            if result.get("processing_notes"):
                 st.markdown("### Processing Notes")
-                for note in st.session_state.slides_result["processing_notes"]:
+                for note in result["processing_notes"]:
                     st.write(f"- {note}")
 
             with st.expander("JSON Structure", expanded=False):
-                st.json(st.session_state.slides_result)
+                st.json(result)
 
 with quiz_tab:
     st.subheader("Quiz Generation")
     st.caption("Quiz generation uses the first selected document.")
-    n_questions = st.slider("Number of questions", min_value=3, max_value=10, value=5)
+    qc1, qc2 = st.columns(2)
+    with qc1:
+        n_mcq = st.slider("Multiple choice (MCQ)", min_value=0, max_value=15, value=3)
+    with qc2:
+        n_short_answer = st.slider("Short answer (sentence)", min_value=0, max_value=15, value=2)
+    if n_mcq + n_short_answer < 1:
+        st.warning("Choose at least one question (MCQ and/or short answer).")
     difficulty = st.selectbox("Difficulty", ["easy", "medium", "hard"], index=1)
 
     if st.button("Generate Quiz", type="primary", key="quiz_button"):
-        with st.spinner("Generating quiz..."):
-            result, api_error = safe_api_call(
-                api_post,
-                backend_url,
-                "/agents/quiz",
-                {
-                    "document_id": primary_document_id,
-                    "n_questions": n_questions,
-                    "difficulty": difficulty,
-                },
-            )
-
-        if api_error:
-            st.error(api_error)
+        if n_mcq + n_short_answer < 1:
+            st.error("Need at least one MCQ or short-answer question.")
         else:
-            st.session_state.quiz_result = result
-            st.session_state.quiz_document_id = primary_document_id
-            st.session_state.quiz_document_label = selected_labels[0]
+            with st.spinner("Generating quiz..."):
+                result, api_error = safe_api_call(
+                    api_post,
+                    backend_url,
+                    "/agents/quiz",
+                    {
+                        "document_id": primary_document_id,
+                        "n_mcq": n_mcq,
+                        "n_short_answer": n_short_answer,
+                        "difficulty": difficulty,
+                    },
+                )
 
-            for index, question in enumerate(result["quiz"], start=1):
-                with st.container(border=True):
-                    st.markdown(f"**Q{index}. {question['question']}**")
-                    if question["type"] == "mcq":
-                        for option in question.get("options", []):
-                            st.write(option)
-                    st.write(f"Answer: {question.get('answer_text', '')}")
-                    st.caption(question.get("explanation", ""))
+            if api_error:
+                st.error(api_error)
+            else:
+                st.session_state.quiz_result = result
+                st.session_state.quiz_document_id = primary_document_id
+                st.session_state.quiz_document_label = selected_labels[0]
 
-            with st.expander("JSON Structure", expanded=False):
-                st.json(result)
+                for index, question in enumerate(result["quiz"], start=1):
+                    with st.container(border=True):
+                        st.markdown(f"**Q{index}. {question['question']}**")
+                        if question["type"] == "mcq":
+                            for option in question.get("options", []):
+                                st.write(option)
+                        st.write(f"Answer: {question.get('answer_text', '')}")
+                        st.caption(question.get("explanation", ""))
+
+                with st.expander("JSON Structure", expanded=False):
+                    st.json(result)
 
     if "quiz_result" in st.session_state:
         if st.session_state.get("quiz_document_id") != primary_document_id:

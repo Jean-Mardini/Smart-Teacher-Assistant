@@ -28,6 +28,8 @@ class Image(BaseModel):
     page: int = 1
     caption: str = ""
     path: str = ""
+    # Populated when PDF_FORMULA_OCR=1 and pix2tex can read equation-like bitmaps (summarizer / RAG use this).
+    description: str = ""
 
 
 class DocumentMetadata(BaseModel):

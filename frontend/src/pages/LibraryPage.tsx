@@ -65,8 +65,8 @@ export function LibraryPage() {
     <>
       <h1 className="page-title">Library</h1>
       <p className="page-sub">
-        Add PDF, DOCX, PPTX, or text files. After uploading, rebuild the search index so Dialogue and Studio can see
-        them.
+        Add PDF, DOCX, PPTX, or text files. Uploads here trigger a search index rebuild automatically; use the button if
+        you dropped files into data/knowledge_base manually or the shelf looks out of date.
       </p>
 
       {error && <div className="error" style={{ whiteSpace: 'pre-wrap' }}>{error}</div>}

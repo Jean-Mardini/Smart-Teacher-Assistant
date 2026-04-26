@@ -14,6 +14,8 @@ from app.services.llm.groq_client import call_llm_json
 
 PROMPT_PATH = Path(__file__).resolve().parents[2] / "prompts" / "summarize.md"
 
+LATEX_OCR_DESC_PREFIX = "LaTeX (OCR):"
+
 MAX_SUMMARY_DOCUMENTS = 10
 MAX_SUMMARY_PAGES = 250
 MAX_SUMMARY_CHARS = 250_000
@@ -43,7 +45,7 @@ def _format_image(image: dict[str, Any], image_notes: list[str]) -> str:
     page = image.get("page", "?")
     caption = (image.get("caption") or "").strip()
     description = (image.get("description") or "").strip()
-    asset_path = (image.get("asset_path") or "").strip()
+    asset_path = (image.get("asset_path") or image.get("path") or "").strip()
 
     if not caption and not description and not asset_path:
         image_notes.append(
@@ -85,6 +87,48 @@ def _build_document_text(document_json: dict[str, Any], image_notes: list[str]) 
             parts.append(formatted_image)
 
     return "\n\n".join(part for part in parts if part.strip())
+
+
+def _normalize_formula_key(s: str) -> str:
+    return " ".join(s.split())
+
+
+def _extract_latex_ocr_formulas(documents: list[dict[str, Any]]) -> list[str]:
+    """Pull LaTeX strings from PDF formula-OCR image descriptions (see ``formula_ocr``)."""
+    seen: set[str] = set()
+    out: list[str] = []
+    for doc in documents:
+        for img in doc.get("images") or []:
+            if not isinstance(img, dict):
+                continue
+            desc = (img.get("description") or "").strip()
+            if not desc.startswith(LATEX_OCR_DESC_PREFIX):
+                continue
+            latex = desc[len(LATEX_OCR_DESC_PREFIX) :].strip()
+            if latex.startswith("`") and latex.endswith("`") and len(latex) >= 2:
+                latex = latex[1:-1].strip()
+            key = _normalize_formula_key(latex)
+            if key and key not in seen:
+                seen.add(key)
+                out.append(latex)
+    return out
+
+
+def _merge_formula_lists(ocr_list: list[str], llm_list: object) -> list[str]:
+    """Prefer OCR order; append LLM-only strings that are not duplicates."""
+    merged: list[str] = list(ocr_list)
+    seen = {_normalize_formula_key(x) for x in merged}
+    if not isinstance(llm_list, list):
+        return merged
+    for raw in llm_list:
+        s = str(raw).strip()
+        if not s:
+            continue
+        key = _normalize_formula_key(s)
+        if key and key not in seen:
+            seen.add(key)
+            merged.append(s)
+    return merged
 
 
 def _build_combined_text(documents: list[dict[str, Any]], image_notes: list[str]) -> tuple[str, list[str], int]:
@@ -143,6 +187,7 @@ TEXT:
 """
     data = call_llm_json(system, user)
     data.setdefault("action_items", [])
+    data.setdefault("formulas", [])
     data.setdefault("glossary", [])
     data.setdefault("key_points", [])
     data.setdefault("summary", "")
@@ -282,6 +327,7 @@ async def run_summarizer(
             summary="",
             key_points=[],
             action_items=[],
+            formulas=[],
             glossary=[],
             source_documents=source_documents,
             total_pages=total_pages,
@@ -313,9 +359,12 @@ async def run_summarizer(
     )
 
     data.setdefault("action_items", [])
+    data.setdefault("formulas", [])
     data.setdefault("glossary", [])
     data.setdefault("key_points", [])
     data.setdefault("summary", "")
+    ocr_formulas = _extract_latex_ocr_formulas(documents)
+    data["formulas"] = _merge_formula_lists(ocr_formulas, data.get("formulas"))
     data["source_documents"] = source_documents
     data["total_pages"] = total_pages
     data["chunk_count"] = chunk_count

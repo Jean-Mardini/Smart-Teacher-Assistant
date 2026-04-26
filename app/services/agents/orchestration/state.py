@@ -18,6 +18,8 @@ class TeachingAssistantState(TypedDict, total=False):
     temperature: float
     n_slides: int
     n_questions: int
+    n_mcq: int
+    n_short_answer: int
     quiz_difficulty: str
     submission_text: str
     rubric_items: list[dict[str, Any]]

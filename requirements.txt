@@ -6,10 +6,12 @@ pypdf
 python-docx
 pandas
 python-pptx
+playwright>=1.40.0
 openpyxl
 python-multipart
 chromadb
 openai
+huggingface_hub>=0.24.0
 python-dotenv
 pytesseract
 groq

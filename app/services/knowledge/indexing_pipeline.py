@@ -195,7 +195,10 @@ def index_knowledge_base(
 
     total_chunks = 0
     for document in documents:
-        total_chunks += store.add_chunks(chunk_document(document))
+        try:
+            total_chunks += store.add_chunks(chunk_document(document))
+        except Exception as exc:
+            print(f"Skipping chunk/index for {document.document_id}: {exc}")
 
     return IndexingResult(
         indexed_documents=len(documents),

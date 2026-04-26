@@ -6,8 +6,32 @@ from fastapi import APIRouter
 from pydantic import BaseModel, Field, field_validator
 
 from app.services.agents.orchestration.assistant_graph import invoke_teaching_graph
+from app.services.knowledge.indexing_pipeline import list_local_document_infos_light
 
 router = APIRouter()
+
+
+def _resolve_document_ids(raw_ids: list[str]) -> list[str]:
+    """Map partial or typo ids to real library ids when there is exactly one prefix match."""
+    cleaned = [x.strip() for x in raw_ids if x and str(x).strip()]
+    if not cleaned:
+        return []
+    try:
+        catalog = list_local_document_infos_light()
+    except Exception:
+        return cleaned
+    known = {d.document_id for d in catalog}
+    out: list[str] = []
+    for r in cleaned:
+        if r in known:
+            out.append(r)
+            continue
+        hits = [d.document_id for d in catalog if d.document_id.startswith(r)]
+        if len(hits) == 1:
+            out.append(hits[0])
+        else:
+            out.append(r)
+    return list(dict.fromkeys(out))
 
 
 class ChatRequest(BaseModel):
@@ -48,11 +72,12 @@ class ChatResponse(BaseModel):
 @router.post("/chat", response_model=ChatResponse)
 async def chat(req: ChatRequest):
     """Dialogue with documents — implemented via LangGraph (dialogue node → RAG + Groq)."""
+    doc_ids = _resolve_document_ids(list(req.document_ids))
     state = await invoke_teaching_graph(
         {
             "message": req.question,
             "intent": "dialogue",
-            "document_ids": list(req.document_ids),
+            "document_ids": doc_ids,
             "length": req.length,
             "top_k": req.top_k,
             "temperature": req.temperature,

@@ -34,8 +34,9 @@ def extract_docx_text(filepath: str, document_id: str = "doc"):
     pages = []
 
     for para in doc.paragraphs:
-
-        style_name = (para.style.name or "").lower()
+        # python-docx: paragraphs in some templates have no assigned style (style is None).
+        style_obj = getattr(para, "style", None)
+        style_name = ((getattr(style_obj, "name", None) or "") or "").lower()
         raw = para.text.strip()
 
         if not raw:

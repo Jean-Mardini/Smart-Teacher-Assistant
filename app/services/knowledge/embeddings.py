@@ -12,7 +12,8 @@ from collections import Counter
 from typing import Dict, Iterable, List
 
 
-TOKEN_RE = re.compile(r"[A-Za-z0-9_]+")
+# Unicode-aware so non-English materials (Arabic, accented text, etc.) still get non-empty embeddings.
+TOKEN_RE = re.compile(r"\w+")
 
 
 def tokenize(text: str) -> List[str]:

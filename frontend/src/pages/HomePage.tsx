@@ -51,7 +51,9 @@ export function HomePage() {
         </div>
         {err && (
           <p className="error" style={{ marginTop: '1rem' }}>
-            Connect the backend: <code>uvicorn app.main:app --reload</code> at <code>{API_BASE}</code>
+            Connect the backend:{' '}
+            <code>python -m uvicorn app.main:app --reload --host 127.0.0.1 --port 8000</code> — UI expects{' '}
+            <code>{API_BASE}</code> (set <code>VITE_API_URL</code> in <code>frontend/.env.local</code> if different).
             <br />
             <small>{err}</small>
           </p>
@@ -62,7 +64,7 @@ export function HomePage() {
         <Link to="/library">
           <article className="bento__card panel--lift">
             <h3>Library</h3>
-            <p>Upload materials and rebuild the search index for Dialogue.</p>
+            <p>Upload materials — the search index refreshes automatically for Dialogue.</p>
           </article>
         </Link>
         <Link to="/chat">

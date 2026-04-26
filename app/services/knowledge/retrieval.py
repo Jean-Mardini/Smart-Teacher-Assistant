@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import List
+from typing import List, Optional
 
 from app.core.config import settings
 from app.models.rag import RAGChunk
@@ -21,13 +21,12 @@ class Retriever:
         self,
         query: str,
         top_k: int | None = None,
-        document_ids: List[str] | None = None,
+        document_ids: Optional[List[str]] = None,
     ) -> List[RAGChunk]:
         top_k = top_k or settings.default_top_k
+        ids = [d for d in (document_ids or []) if d and str(d).strip()] or None
         results = self.store.similarity_search(
-            query=query,
-            top_k=top_k,
-            document_ids=document_ids,
+            query=query, top_k=top_k, document_ids=ids
         )
         return [result.chunk for result in results]
 

@@ -17,8 +17,8 @@ Return ONLY valid JSON matching this schema:
 }
 
 Rules:
-- Generate exactly {N_QUESTIONS} questions.
-- Mix difficulties: ~40% easy, 40% medium, 20% hard.
+- Generate exactly **{N_MCQ}** questions with `"type": "mcq"` and exactly **{N_SHORT}** questions with `"type": "short_answer"` (total **{N_TOTAL}**). Do not include any other types.
+- Mix difficulties across the whole set: roughly ~40% easy, 40% medium, 20% hard (approximate counts per type).
 - Use ONLY document info, no outside knowledge.
 - Every question MUST include source_refs.
 - Keep each question directly supported by the provided text.

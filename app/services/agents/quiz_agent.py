@@ -92,14 +92,24 @@ def normalize_question(q: Dict[str, Any]) -> Dict[str, Any]:
 # ----------------------------------------
 async def run_quiz(
     doc_json: dict,
-    n_questions: int,
-    difficulty: str = "medium"
+    n_mcq: int,
+    n_short_answer: int,
+    difficulty: str = "medium",
 ) -> QuizResult:
+    n_mcq = max(0, min(20, int(n_mcq)))
+    n_short_answer = max(0, min(20, int(n_short_answer)))
+    n_total = n_mcq + n_short_answer
+    if n_total < 1:
+        return QuizResult(quiz=[])
 
     try:
         # -------- LOAD PROMPT --------
         prompt = PROMPT_PATH.read_text(encoding="utf-8")
-        prompt = prompt.replace("{N_QUESTIONS}", str(n_questions))
+        prompt = (
+            prompt.replace("{N_MCQ}", str(n_mcq))
+            .replace("{N_SHORT}", str(n_short_answer))
+            .replace("{N_TOTAL}", str(n_total))
+        )
 
         # -------- BUILD TEXT --------
         full_text = build_full_text(doc_json)
@@ -137,9 +147,10 @@ TEXT:
             except Exception as inner_error:
                 print("⚠️ Skipping bad question:", inner_error)
 
-        # -------- LIMIT TO REQUESTED NUMBER --------
-        if len(fixed_quiz) > n_questions:
-            fixed_quiz = fixed_quiz[:n_questions]
+        # -------- LIMIT TO REQUESTED COUNTS PER TYPE --------
+        mcqs = [q for q in fixed_quiz if q.get("type") == "mcq"]
+        shorts = [q for q in fixed_quiz if q.get("type") == "short_answer"]
+        fixed_quiz = mcqs[:n_mcq] + shorts[:n_short_answer]
 
         return QuizResult(quiz=fixed_quiz)
 
