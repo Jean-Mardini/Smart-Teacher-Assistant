@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any, List, Optional
+from typing import Any, List, Literal, Optional
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
@@ -26,7 +26,7 @@ class GammaSlideSpec(BaseModel):
                 continue
             line = " ".join(item.split()).strip()
             if line and line not in out:
-                out.append(line[:620])
+                out.append(line[:900])
         return out[:6]
 
 
@@ -38,9 +38,13 @@ class GenerateSlidesRequest(BaseModel):
     source_text: Optional[str] = None
     source_title: Optional[str] = None
     source_url: Optional[str] = None
-    n_slides: int = Field(default=6, ge=3, le=20)
+    n_slides: int = Field(default=6, ge=1, le=20)
     deck_title: Optional[str] = Field(default=None, max_length=300)
     image_style: str = Field(default="vector_science", max_length=120)
+    presentation_detail: Literal["standard", "deep"] = Field(
+        default="standard",
+        description="deep = denser teaching bullets, limitations/trade-offs when the source supports them, stronger synthesis on the last slide.",
+    )
 
     @model_validator(mode="after")
     def validate_source(self) -> "GenerateSlidesRequest":

@@ -49,10 +49,17 @@ export function isLikelyPlaceholderSlideImage(s: string): boolean {
   return bytes.length < 200
 }
 
-/** True when the deck may show an `<img>` (non-empty, valid, not a tiny placeholder). */
-export function shouldDisplaySlideImage(s: string | undefined | null): boolean {
+/**
+ * True when the deck may show an `<img>` (non-empty, valid; tiny placeholders hidden except slide 0).
+ * Slide 1 (index 0) is the live hero: backend may fall back to a small PNG — hiding it looked like “no image”.
+ */
+export function shouldDisplaySlideImage(
+  s: string | undefined | null,
+  slideIndex?: number,
+): boolean {
   if (typeof s !== 'string' || !s.trim()) return false
   if (!isValidLiveSlideDataUrl(s)) return false
+  if (slideIndex === 0) return true
   return !isLikelyPlaceholderSlideImage(s)
 }
 

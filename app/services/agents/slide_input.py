@@ -11,7 +11,7 @@ import requests
 from bs4 import BeautifulSoup
 from fastapi import HTTPException
 
-from app.models.agents import SlideRequest
+from app.models.agents import QuizRequest, SlideRequest
 from app.services.knowledge.indexing_pipeline import get_local_document_by_id
 
 
@@ -80,6 +80,26 @@ def fetch_url_text(url: str, max_chars: int = 120_000) -> str:
     if not text:
         raise ValueError("No readable text could be extracted from the URL.")
     return text[:max_chars]
+
+
+async def document_dict_for_quiz_request(req: QuizRequest) -> dict:
+    """Build ParsedDocument-shaped JSON for ``run_quiz`` using the same sources as slide generation."""
+    sr = SlideRequest(
+        document_id=(req.document_id or "").strip() or None,
+        source_text=(req.source_text or "").strip() or None,
+        source_title=req.source_title,
+        source_url=(req.source_url or "").strip() or None,
+        n_slides=1,
+        template="academic_default",
+        generate_images=False,
+        max_generated_images=0,
+    )
+    doc = await document_dict_for_slide_request(sr)
+    overlay = (req.source_title or "").strip()
+    if overlay:
+        doc = dict(doc)
+        doc["title"] = overlay[:500]
+    return doc
 
 
 async def document_dict_for_slide_request(req: SlideRequest) -> dict:

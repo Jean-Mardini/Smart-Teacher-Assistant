@@ -39,12 +39,6 @@ const IconGrade = () => (
     <path d="M4 20h16M6 16l4-12 4 12M9 13h6" />
   </svg>
 )
-const IconGenerate = () => (
-  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
-    <path d="M12 3v3M12 18v3M4.22 4.22l2.12 2.12M17.66 17.66l2.12 2.12M3 12h3M18 12h3M4.22 19.78l2.12-2.12M17.66 6.34l2.12-2.12" strokeLinecap="round" />
-  </svg>
-)
-
 const links = [
   { to: '/', label: 'Home', Icon: IconHome },
   { to: '/library', label: 'Library', Icon: IconBook },
@@ -52,7 +46,6 @@ const links = [
   { to: '/summarize', label: 'Summarize', Icon: IconLines },
   { to: '/slides', label: 'Slides', Icon: IconDeck },
   { to: '/quiz', label: 'Quiz', Icon: IconMark },
-  { to: '/generate', label: 'Generate', Icon: IconGenerate },
   { to: '/grade', label: 'Grading', Icon: IconGrade },
 ]
 

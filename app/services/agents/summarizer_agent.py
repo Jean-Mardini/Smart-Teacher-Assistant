@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 from pathlib import Path
 from typing import Any
 
@@ -16,22 +17,203 @@ PROMPT_PATH = Path(__file__).resolve().parents[2] / "prompts" / "summarize.md"
 
 LATEX_OCR_DESC_PREFIX = "LaTeX (OCR):"
 
+
+class SummarizerLimitError(ValueError):
+    """Input exceeds summarizer page / character / document-count limits."""
+
+
+
 MAX_SUMMARY_DOCUMENTS = 10
-MAX_SUMMARY_PAGES = 250
-MAX_SUMMARY_CHARS = 250_000
-# Larger chunks = fewer Groq round-trips (still safe for llama-3.x context on Groq).
-SUMMARY_CHUNK_SIZE = int(os.getenv("SUMMARY_CHUNK_SIZE", "20000"))
-SUMMARY_CHUNK_OVERLAP = int(os.getenv("SUMMARY_CHUNK_OVERLAP", "800"))
-REDUCTION_CHUNK_SIZE = int(os.getenv("REDUCTION_CHUNK_SIZE", "22000"))
-REDUCTION_CHUNK_OVERLAP = int(os.getenv("REDUCTION_CHUNK_OVERLAP", "800"))
-# Parallel partial summarization (independent API calls); cap to avoid rate-limit bursts.
-SUMMARY_MAX_PARALLEL = max(1, min(int(os.getenv("SUMMARY_MAX_PARALLEL", "4")), 12))
+# Large slide decks exceed the old defaults quickly; override via env if needed.
+MAX_SUMMARY_PAGES = int(os.getenv("MAX_SUMMARY_PAGES", "400"))
+MAX_SUMMARY_CHARS = int(os.getenv("MAX_SUMMARY_CHARS", "600000"))
+# Chunk size: Groq on_demand tiers often cap a single request around ~6k input tokens
+# (prompt + document). ~10k chars plus our summarize prompt stays safer; raise on paid tiers.
+SUMMARY_CHUNK_SIZE = int(os.getenv("SUMMARY_CHUNK_SIZE", "10000"))
+SUMMARY_CHUNK_OVERLAP = int(os.getenv("SUMMARY_CHUNK_OVERLAP", "600"))
+REDUCTION_CHUNK_SIZE = int(os.getenv("REDUCTION_CHUNK_SIZE", "12000"))
+REDUCTION_CHUNK_OVERLAP = int(os.getenv("REDUCTION_CHUNK_OVERLAP", "600"))
+# Parallel calls multiply tokens in the same wall-clock minute (Groq on_demand TPM).
+SUMMARY_MAX_PARALLEL = max(1, min(int(os.getenv("SUMMARY_MAX_PARALLEL", "1")), 12))
+
+# Bracket-style numeric citations only (e.g. [1], [12]); post-process never touches formulas list.
+_BRACKET_NUM_REF = re.compile(r"\[(\d+)\]")
 
 
 def _normalize_documents(doc_json: dict[str, Any] | list[dict[str, Any]]) -> list[dict[str, Any]]:
     if isinstance(doc_json, list):
         return doc_json
     return [doc_json]
+
+
+def _coerce_str_list(value: Any) -> list[str]:
+    """Turn common LLM mistakes (single string, null, nested values) into ``list[str]``."""
+    if value is None:
+        return []
+    if isinstance(value, str):
+        s = value.strip()
+        return [s] if s else []
+    if isinstance(value, (list, tuple)):
+        out: list[str] = []
+        for item in value:
+            if isinstance(item, str):
+                t = item.strip()
+                if t:
+                    out.append(t)
+            elif isinstance(item, (int, float)):
+                out.append(str(item))
+            elif isinstance(item, dict):
+                # Prefer a single human-readable line when the model emits objects.
+                t = str(item.get("text") or item.get("point") or item.get("item") or "").strip()
+                if t:
+                    out.append(t)
+                else:
+                    compact = json.dumps(item, ensure_ascii=False)
+                    if compact and compact != "{}":
+                        out.append(compact)
+        return out
+    return [str(value).strip()] if str(value).strip() else []
+
+
+def _coerce_glossary(value: Any) -> list[dict[str, str]]:
+    if not isinstance(value, list):
+        return []
+    out: list[dict[str, str]] = []
+    for item in value:
+        if isinstance(item, dict):
+            term = str(item.get("term", "") or "").strip()
+            definition = str(item.get("definition", "") or "").strip()
+            if term or definition:
+                out.append({"term": term, "definition": definition})
+        elif isinstance(item, str) and item.strip():
+            out.append({"term": item.strip(), "definition": ""})
+    return out
+
+
+def _normalize_summary_payload(data: dict[str, Any]) -> dict[str, Any]:
+    """Normalize model output so :class:`SummaryResult` validation rarely fails on shape."""
+    merged = dict(data)
+    merged["summary"] = str(merged.get("summary") or "")
+    merged["key_points"] = _coerce_str_list(merged.get("key_points"))
+    merged["action_items"] = _coerce_str_list(merged.get("action_items"))
+    merged["formulas"] = _coerce_str_list(merged.get("formulas"))
+    merged["glossary"] = _coerce_glossary(merged.get("glossary"))
+    return merged
+
+
+def _allowed_bracket_reference_ids(source_text: str) -> set[str]:
+    """Digits ``n`` for markers ``[n]`` appearing in the source (citation-style)."""
+    return set(_BRACKET_NUM_REF.findall(source_text or ""))
+
+
+def _strip_bracket_refs_not_in_allowed(text: str, allowed: set[str]) -> tuple[str, int]:
+    if not text or not allowed:
+        return text, 0
+    removed = 0
+
+    def _sub(m: re.Match[str]) -> str:
+        nonlocal removed
+        if m.group(1) in allowed:
+            return m.group(0)
+        removed += 1
+        return ""
+
+    out = _BRACKET_NUM_REF.sub(_sub, text)
+    if removed:
+        out = re.sub(r"  +", " ", out)
+    return out, removed
+
+
+def _apply_reference_marker_postprocess(
+    data: dict[str, Any],
+    citation_source_text: str,
+) -> tuple[dict[str, Any], list[str]]:
+    """Remove ``[n]`` markers the model invented when ``n`` never appears in the source."""
+    allowed = _allowed_bracket_reference_ids(citation_source_text)
+    if not allowed:
+        return data, []
+    out = dict(data)
+    removed_total = 0
+
+    s, n = _strip_bracket_refs_not_in_allowed(str(out.get("summary") or ""), allowed)
+    out["summary"] = s
+    removed_total += n
+
+    kps: list[str] = []
+    for kp in out.get("key_points") or []:
+        t, n2 = _strip_bracket_refs_not_in_allowed(str(kp), allowed)
+        removed_total += n2
+        kps.append(t)
+    out["key_points"] = kps
+
+    actions: list[str] = []
+    for item in out.get("action_items") or []:
+        t, n2 = _strip_bracket_refs_not_in_allowed(str(item), allowed)
+        removed_total += n2
+        actions.append(t)
+    out["action_items"] = actions
+
+    gloss: list[dict[str, str]] = []
+    for item in out.get("glossary") or []:
+        if not isinstance(item, dict):
+            continue
+        term, a = _strip_bracket_refs_not_in_allowed(str(item.get("term", "")), allowed)
+        defin, b = _strip_bracket_refs_not_in_allowed(str(item.get("definition", "")), allowed)
+        removed_total += a + b
+        gloss.append({"term": term.strip(), "definition": defin.strip()})
+    out["glossary"] = gloss
+
+    extras: list[str] = []
+    if removed_total:
+        extras.append(
+            f"Post-processing removed {removed_total} numeric bracket citation(s) [n] that do not "
+            "appear in the combined source text, so only source-backed markers remain."
+        )
+    return out, extras
+
+
+def _should_use_rag_summarize(use_rag: bool | None, num_docs: int, combined_len: int) -> bool:
+    if use_rag is True:
+        return True
+    if use_rag is False:
+        return False
+    thr_single = int(os.getenv("SUMMARY_RAG_CHAR_THRESHOLD", "100000"))
+    thr_multi = int(os.getenv("SUMMARY_RAG_MULTI_DOC_CHAR_THRESHOLD", "50000"))
+    if num_docs > 1 and combined_len > thr_multi:
+        return True
+    if combined_len > thr_single:
+        return True
+    return False
+
+
+def _retrieve_summary_context_sync(documents: list[dict[str, Any]], combined_excerpt: str) -> str:
+    """Pull top similar chunks from the local index for the selected document ids."""
+    ids = [str(d.get("document_id") or "").strip() for d in documents if str(d.get("document_id") or "").strip()]
+    if not ids:
+        return ""
+    titles = [str(d.get("title") or "Document") for d in documents]
+    excerpt = (combined_excerpt or "").strip()[:8000]
+    query = (
+        "Educational materials: themes, definitions, procedures, facts, and references for summarization.\n"
+        f"Document titles: {'; '.join(titles)}\n\n"
+        f"Representative excerpt:\n{excerpt}"
+    )
+    top_k = max(4, min(int(os.getenv("SUMMARY_RAG_TOP_K", "32")), 80))
+    from app.services.knowledge.retrieval import Retriever
+
+    retriever = Retriever()
+    chunks = retriever.retrieve(query, top_k=top_k, document_ids=ids)
+    if not chunks:
+        return ""
+    parts: list[str] = []
+    for c in chunks:
+        head = f"---\n[{c.document_title}]"
+        sh = getattr(c, "section_heading", None)
+        if sh:
+            head += f" — {sh}"
+        head += "\n"
+        parts.append(head + (getattr(c, "chunk_text", None) or "").strip())
+    return "\n\n".join(parts).strip()
 
 
 def _format_table(table: dict[str, Any]) -> str:
@@ -86,7 +268,15 @@ def _build_document_text(document_json: dict[str, Any], image_notes: list[str]) 
         if formatted_image:
             parts.append(formatted_image)
 
-    return "\n\n".join(part for part in parts if part.strip())
+    structured = "\n\n".join(part for part in parts if part.strip())
+    full_text = (document_json.get("full_text") or "").strip()
+    if not structured and full_text:
+        return full_text
+    # Heading detection often yields sparse sections for slide PDFs while ``full_text`` still
+    # holds the page stream; prefer the larger extraction when it clearly dominates.
+    if full_text and len(full_text) > max(8000, int(len(structured) * 1.5)):
+        return full_text
+    return structured or full_text
 
 
 def _normalize_formula_key(s: str) -> str:
@@ -206,12 +396,21 @@ def _collect_processing_notes(
     combined_text: str,
     chunk_count: int,
     image_notes: list[str],
+    *,
+    input_char_count: int | None = None,
+    rag_used: bool = False,
 ) -> list[str]:
     notes: list[str] = []
     section_count = sum(len(doc.get("sections", [])) for doc in documents)
     table_count = sum(len(doc.get("tables", [])) for doc in documents)
     image_count = sum(len(doc.get("images", [])) for doc in documents)
+    approx_chars = input_char_count if input_char_count is not None else len(combined_text)
 
+    if rag_used:
+        notes.append(
+            "Built summarization input from vector retrieval (RAG) over the selected document id(s); "
+            "bracket citations [n] are still validated against the full extracted text."
+        )
     if len(documents) > 1:
         notes.append(f"Combined {len(documents)} documents into one summary request.")
     if chunk_count > 1:
@@ -220,7 +419,7 @@ def _collect_processing_notes(
         notes.append("Processed the source text in a single summarization pass.")
 
     notes.append(
-        f"Processed approximately {len(combined_text)} characters across "
+        f"Processed approximately {approx_chars} characters across "
         f"{section_count} sections, {table_count} tables, and {image_count} images."
     )
 
@@ -234,15 +433,15 @@ def _collect_processing_notes(
 
 def _validate_limits(documents: list[dict[str, Any]], total_pages: int, combined_text: str) -> None:
     if len(documents) > MAX_SUMMARY_DOCUMENTS:
-        raise ValueError(
+        raise SummarizerLimitError(
             f"You can summarize up to {MAX_SUMMARY_DOCUMENTS} documents at once."
         )
     if total_pages > MAX_SUMMARY_PAGES:
-        raise ValueError(
+        raise SummarizerLimitError(
             f"The current summarizer supports up to {MAX_SUMMARY_PAGES} pages per request."
         )
     if len(combined_text) > MAX_SUMMARY_CHARS:
-        raise ValueError(
+        raise SummarizerLimitError(
             f"The current summarizer supports up to {MAX_SUMMARY_CHARS} characters of extracted content per request."
         )
 
@@ -314,6 +513,7 @@ async def _synthesize_long_input(
 async def run_summarizer(
     doc_json: dict[str, Any] | list[dict[str, Any]],
     length: str = "medium",
+    use_rag: bool | None = None,
 ) -> SummaryResult:
     prompt = PROMPT_PATH.read_text(encoding="utf-8")
     prompt = prompt.replace("{SUMMARY_LENGTH}", _summary_length_instruction(length))
@@ -321,6 +521,7 @@ async def run_summarizer(
     documents = _normalize_documents(doc_json)
     image_notes: list[str] = []
     combined_text, source_documents, total_pages = _build_combined_text(documents, image_notes)
+    citation_source_text = combined_text
 
     if not combined_text.strip():
         return SummaryResult(
@@ -336,26 +537,36 @@ async def run_summarizer(
             processing_notes=["No textual content was extracted from the selected document(s)."],
         )
 
-    _validate_limits(documents, total_pages, combined_text)
+    rag_used = False
+    synthesis_input = combined_text
+    if _should_use_rag_summarize(use_rag, len(documents), len(combined_text)):
+        rag_text = await asyncio.to_thread(_retrieve_summary_context_sync, documents, combined_text)
+        if len(rag_text.strip()) > 400:
+            synthesis_input = rag_text
+            rag_used = True
+
+    _validate_limits(documents, total_pages, synthesis_input)
 
     title = source_documents[0] if len(source_documents) == 1 else "Multi-document summary"
     chunk_candidates = chunk_text(
-        combined_text,
+        synthesis_input,
         chunk_size=SUMMARY_CHUNK_SIZE,
         overlap=SUMMARY_CHUNK_OVERLAP,
     )
 
     if len(chunk_candidates) <= 1:
-        data = await asyncio.to_thread(_call_summary_prompt, prompt, title, combined_text)
+        data = await asyncio.to_thread(_call_summary_prompt, prompt, title, synthesis_input)
         chunk_count = 1
     else:
-        data, chunk_count = await _synthesize_long_input(prompt, title, combined_text)
+        data, chunk_count = await _synthesize_long_input(prompt, title, synthesis_input)
 
     processing_notes = _collect_processing_notes(
         documents,
         combined_text,
         chunk_count,
         image_notes,
+        input_char_count=len(synthesis_input),
+        rag_used=rag_used,
     )
 
     data.setdefault("action_items", [])
@@ -370,5 +581,10 @@ async def run_summarizer(
     data["chunk_count"] = chunk_count
     data["image_notes"] = image_notes
     data["processing_notes"] = processing_notes
+
+    data = _normalize_summary_payload(data)
+    data, ref_extras = _apply_reference_marker_postprocess(data, citation_source_text)
+    if ref_extras:
+        data["processing_notes"] = list(data.get("processing_notes") or []) + ref_extras
 
     return SummaryResult.model_validate(data)

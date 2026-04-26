@@ -362,7 +362,51 @@ _COMPOSITION_VARIETY_HINTS: tuple[str, ...] = (
 )
 
 
-def _sanitize_image_prompt(slide: dict[str, Any], deck_title: str) -> None:
+def _rewrite_vague_image_prompt_for_style(
+    title: str,
+    b0: str,
+    b_rest: str,
+    style_key: str,
+) -> str:
+    """Concrete scene when the LLM ``image_prompt`` was too vague — must match UI art preset (not always \"science vector\")."""
+    tail = (f"{b0}" + (f"; {b_rest}" if b_rest else "")).strip()
+    sk = (style_key or "").strip().lower() or "vector_science"
+    no_text = "No readable text or labels in the frame."
+    if sk == "photo":
+        return (
+            f"Photorealistic educational photograph of «{title}»: {tail}. Natural lighting, believable environment, "
+            f"shallow depth of field where appropriate. {no_text}"
+        )
+    if sk == "abstract":
+        return (
+            f"Abstract modern composition evoking «{title}»: {tail}. Cohesive color fields and motion; topic-linked forms, "
+            f"non-literal but not random decoration. {no_text}"
+        )
+    if sk == "3d":
+        return (
+            f"Stylized 3D educational render of «{title}»: {tail}. Soft global illumination, rounded readable forms, "
+            f"one hero subject. {no_text}"
+        )
+    if sk == "line_art":
+        return (
+            f"Elegant high-contrast line art / ink drawing of «{title}»: {tail}. Light paper texture; minimal shading. {no_text}"
+        )
+    if sk == "illustration":
+        return (
+            f"Polished editorial illustration of «{title}»: {tail}. One clear focal metaphor; magazine clarity; not clip art. {no_text}"
+        )
+    if sk == "diagram":
+        return (
+            f"Clean schematic vector diagram for «{title}»: {tail}. Color-coded flow and shapes; imply structure without letters. {no_text}"
+        )
+    return (
+        f"Highly detailed realistic scientific illustration and educational diagram for «{title}»: {tail}. "
+        "Clean background; textbook clarity; photorealistic or precise scientific visualization — not cartoon clip art. "
+        + no_text
+    )
+
+
+def _sanitize_image_prompt(slide: dict[str, Any], deck_title: str, image_style: str | None = None) -> None:
     """Rewrite weak LLM ``image_prompt`` values so diffusion models get concrete nouns."""
     raw = (slide.get("image_prompt") or "").strip()
     lower = raw.lower()
@@ -379,11 +423,47 @@ def _sanitize_image_prompt(slide: dict[str, Any], deck_title: str) -> None:
     if not looks_vague and not too_short:
         return
 
-    slide["image_prompt"] = (
-        f"Highly detailed realistic scientific illustration and educational diagram for «{title}»: {b0}"
-        + (f"; {b_rest}" if b_rest else "")
-        + ". Clean background; textbook clarity; photorealistic or precise scientific visualization — not cartoon clip art. "
-        "No readable text or labels in the frame."
+    slide["image_prompt"] = _rewrite_vague_image_prompt_for_style(title, b0, b_rest, image_style or "vector_science")
+
+
+def _quality_and_anti_style_lines(image_style: str) -> tuple[str, str]:
+    """Opening lines for T2I prompts — must align with UI preset (early tokens dominate HF / SDXL)."""
+    sk = (image_style or "").strip().lower() or "vector_science"
+    if sk == "photo":
+        return (
+            "QUALITY: Photorealistic educational photograph; natural lighting; believable scene; sharp subject focus.",
+            "ANTI-STYLE: No cartoon mascot clip art; avoid readable text, watermarks, or empty gradient-only frames.",
+        )
+    if sk == "abstract":
+        return (
+            "QUALITY: Cohesive abstract composition; color and motion echo the lesson topic; gallery-like clarity.",
+            "ANTI-STYLE: No random rainbow noise unrelated to the topic; no readable text or logos.",
+        )
+    if sk == "3d":
+        return (
+            "QUALITY: Stylized 3D render with soft global illumination; one clear hero subject tied to the topic.",
+            "ANTI-STYLE: No crowded toy clutter; avoid readable text or UI mockups.",
+        )
+    if sk == "line_art":
+        return (
+            "QUALITY: High-contrast line art / ink drawing; one focal subject; generous negative space.",
+            "ANTI-STYLE: No muddy smudges; avoid readable micro-text or chart axes with letters.",
+        )
+    if sk == "illustration":
+        return (
+            "QUALITY: Polished editorial illustration; confident shapes; one focal metaphor matching the topic.",
+            "ANTI-STYLE: No preschool doodle style; avoid generic unrelated silhouettes.",
+        )
+    if sk == "diagram":
+        return (
+            "QUALITY: Clean schematic diagram or infographic layout; color-coded regions and implied flow without letters.",
+            "ANTI-STYLE: No photo clutter or 3D toy renders; avoid readable text in the frame.",
+        )
+    return (
+        "QUALITY: Highly detailed realistic scientific illustration OR precise educational diagram; clean neutral "
+        "background; publication-ready clarity; sharp focus.",
+        "ANTI-STYLE: No cartoon, anime, children's doodle style, abstract decoration-only blobs unrelated to the topic, "
+        "flat mascot clipart, or vague gradient backgrounds unrelated to the topic.",
     )
 
 
@@ -425,7 +505,7 @@ def _compose_topic_first_image_prompt(
 ) -> str:
     """Single prompt for **all** image APIs — topic and scene **first** (CLIP/FLUX attend strongly to early tokens)."""
     ensure_slide_image_prompt(slide, document_title)
-    _sanitize_image_prompt(slide, document_title)
+    _sanitize_image_prompt(slide, document_title, image_style)
 
     title = (slide.get("slide_title") or slide.get("title") or "Slide").strip()
     bullets_list = [
@@ -438,12 +518,17 @@ def _compose_topic_first_image_prompt(
     speaker_notes = (slide.get("speaker_notes") or "").strip()
     dt = (document_title or "Presentation").strip()
 
+    # Decks with 6+ slides: Groq returns more (often longer) slide-1 copy → image APIs fail more often without tighter prompts.
+    large_deck = bool(deck_slide_count and deck_slide_count >= 6)
     topic_cues = _topic_visual_cues(title, bullets_plain, dt)
     cues_line = ""
     if topic_cues:
-        cues_line = "\nSupporting motifs: " + topic_cues.replace("\n", " ").strip()[:420]
+        motif_cap = 320 if large_deck else 420
+        cues_line = "\nSupporting motifs: " + topic_cues.replace("\n", " ").strip()[:motif_cap]
 
     style_line = _compact_style_directive(image_style)
+    scene_cap = 600 if large_deck else 850
+    bullets_cap = 520 if large_deck else 720
 
     variety_line = ""
     if slide_index is not None:
@@ -456,17 +541,18 @@ def _compose_topic_first_image_prompt(
         variety_line = (
             f"\n{pos} — vary layout vs other slides in this deck (same modern educational style): {hint}"
         )
+        if large_deck:
+            variety_line = f"\n{pos} — {hint}"
 
+    qual, anti = _quality_and_anti_style_lines(image_style)
     # Order matters: subject → scene → bullet nouns → style (keep style compact).
     chunks = [
-        "QUALITY: Highly detailed realistic scientific illustration OR precise educational diagram; clean neutral "
-        "background; publication-ready clarity; sharp focus.",
-        "ANTI-STYLE: No cartoon, anime, children's doodle style, abstract decoration-only blobs, flat mascot clipart, "
-        "or vague gradient backgrounds unrelated to the topic.",
+        qual,
+        anti,
         f'MAIN TOPIC (must match this lesson — do not illustrate a different subject): "{title}".',
-        f"Primary scene to render: {llm_scene[:850]}",
-        "Ground the image in these teaching concepts as visible reality (specific objects, organisms, environments, lab "
-        f"equipment, natural settings): {bullets_plain[:720] or title}",
+        f"Primary scene to render: {llm_scene[:scene_cap]}",
+        "Ground the visual in these teaching concepts (concrete props, environments, diagram forms, or metaphorical "
+        f"shapes implied by the topic): {bullets_plain[:bullets_cap] or title}",
         f"Deck context for mood only: «{dt[:140]}».",
         f"Rendering direction: {style_line}",
         "The image must immediately explain the slide idea to an audience — professional school or university deck.",
@@ -475,8 +561,9 @@ def _compose_topic_first_image_prompt(
     ]
     body = "\n".join(chunks) + cues_line + variety_line
     if speaker_notes and len(speaker_notes) < 900:
-        body += "\nAdditional facts (do not render as text): " + speaker_notes[:500]
-    return body[:2400]
+        sn_cap = 320 if large_deck else 500
+        body += "\nAdditional facts (do not render as text): " + speaker_notes[:sn_cap]
+    return body[:2100] if large_deck else body[:2400]
 
 
 def _build_prompt(
@@ -949,7 +1036,7 @@ def _generate_placeholder_image_bytes(
 
     width, height = 1536, 864
     ensure_slide_image_prompt(slide, document_title)
-    _sanitize_image_prompt(slide, document_title)
+    _sanitize_image_prompt(slide, document_title, image_style)
 
     # Last resort: try stock again, then a neutral gradient (no cartoon shapes — looks less like a toy slide).
     if _stock_mix_enabled():
@@ -1099,9 +1186,9 @@ def _generate_pollinations_image(prompt: str, *, seed: int | None = None) -> tup
     try:
         req = Request(url, headers={"User-Agent": "SmartTeacherAssistant/1.1"})
         try:
-            poll_to = float((os.getenv("POLLINATIONS_TIMEOUT") or "35").strip() or "35")
+            poll_to = float((os.getenv("POLLINATIONS_TIMEOUT") or "50").strip() or "50")
         except ValueError:
-            poll_to = 35.0
+            poll_to = 50.0
         poll_to = max(18.0, min(240.0, poll_to))
         with urlopen(req, timeout=poll_to) as resp:
             body = resp.read()
@@ -1127,6 +1214,20 @@ def _generate_single_image(
         slide_index=slide_index,
         deck_slide_count=deck_slide_count,
     )
+
+    # 6+ slides: try compact Pollinations before HF — long slide-1 text often breaks HF first; short URL usually works.
+    if (
+        deck_slide_count is not None
+        and deck_slide_count >= 6
+        and _pollinations_fallback_enabled()
+        and not _pollinations_first_enabled()
+    ):
+        compact_early = _compact_retry_prompt(document_title, slide, image_style)
+        early_p, early_m = _generate_pollinations_image(
+            compact_early, seed=slide_index * 47_311 + (deck_slide_count or 0) * 17
+        )
+        if early_p:
+            return early_p, early_m or "pollinations"
 
     # Free tier first: Pollinations needs no API key (set SLIDE_IMAGE_POLLINATIONS_FIRST=1).
     if _pollinations_first_enabled() and _pollinations_fallback_enabled():
@@ -1172,7 +1273,7 @@ def _generate_single_image(
 
         try:
             ensure_slide_image_prompt(slide, document_title)
-            _sanitize_image_prompt(slide, document_title)
+            _sanitize_image_prompt(slide, document_title, image_style)
             b, m = _fallback_stock_or_placeholder_bytes(
                 slide, document_title, image_style, slide_index
             )
@@ -1235,7 +1336,7 @@ def _generate_single_image(
 
     if provider == "placeholder":
         ensure_slide_image_prompt(slide, document_title)
-        _sanitize_image_prompt(slide, document_title)
+        _sanitize_image_prompt(slide, document_title, image_style)
         b, m = _fallback_stock_or_placeholder_bytes(slide, document_title, image_style, slide_index)
         return b, m
 
@@ -1247,7 +1348,7 @@ def _generate_single_image(
             return stock_png, f"stock:{st_src}"
         try:
             ensure_slide_image_prompt(slide, document_title)
-            _sanitize_image_prompt(slide, document_title)
+            _sanitize_image_prompt(slide, document_title, image_style)
             b, m = _fallback_stock_or_placeholder_bytes(
                 slide, document_title, image_style, slide_index
             )
@@ -1262,7 +1363,7 @@ def _generate_single_image(
         return stock_png, f"stock:{st_src}"
     try:
         ensure_slide_image_prompt(slide, document_title)
-        _sanitize_image_prompt(slide, document_title)
+        _sanitize_image_prompt(slide, document_title, image_style)
         b, m = _fallback_stock_or_placeholder_bytes(slide, document_title, image_style, slide_index)
         return b, m
     except Exception:
@@ -1615,7 +1716,7 @@ def live_slide_image_data_url(
 ) -> str:
     """Build a PNG data URL for browser embedding (HF first, then stock / backup AI; soft placeholder last)."""
     ensure_slide_image_prompt(slide, document_title)
-    _sanitize_image_prompt(slide, document_title)
+    _sanitize_image_prompt(slide, document_title, image_style)
 
     try:
         raw, _ = _generate_single_image(

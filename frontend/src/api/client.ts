@@ -1,17 +1,56 @@
-/** Base URL for FastAPI (no trailing slash). */
-export const API_BASE =
-  import.meta.env.VITE_API_URL?.replace(/\/$/, '') || 'http://127.0.0.1:8000'
+/**
+ * Base URL for FastAPI (no trailing slash).
+ * - In **dev**, if `VITE_API_URL` is unset, use same-origin paths so Vite’s `server.proxy` forwards to FastAPI
+ *   (fixes common “Cannot reach http://127.0.0.1:8000” when the app is opened at `http://localhost:5173`).
+ * - Set `VITE_API_URL` in `.env.local` to hit a different host (e.g. LAN IP) or for production builds.
+ */
+function resolveApiBase(): string {
+  const explicit = import.meta.env.VITE_API_URL?.replace(/\/$/, '').trim()
+  if (explicit) return explicit
+  if (import.meta.env.DEV) return ''
+  return 'http://127.0.0.1:8000'
+}
+
+export const API_BASE = resolveApiBase()
+
+/** Turn FastAPI / Starlette error bodies into a short readable message. */
+export function parseHttpErrorBody(text: string, status: number, statusText: string): string {
+  const raw = (text || '').trim()
+  if (!raw) return `${status} ${statusText}`.trim()
+  try {
+    const j = JSON.parse(raw) as { detail?: unknown }
+    const d = j?.detail
+    if (typeof d === 'string') return d
+    if (Array.isArray(d)) {
+      const parts = d.map((item: unknown) => {
+        if (typeof item === 'string') return item
+        if (item && typeof item === 'object' && 'msg' in item) {
+          return String((item as { msg?: string }).msg || '')
+        }
+        return ''
+      })
+      const joined = parts.filter(Boolean).join(' ')
+      if (joined) return joined
+    }
+  } catch {
+    /* not JSON */
+  }
+  if (raw.length > 800) return `${raw.slice(0, 800)}…`
+  return raw
+}
 
 function wrapNetworkError(err: unknown): Error {
   if (err instanceof TypeError) {
+    const where =
+      API_BASE.trim() !== ''
+        ? API_BASE
+        : `${typeof window !== 'undefined' ? window.location.origin : ''} → Vite proxy → http://127.0.0.1:8000`
     return new Error(
-      `Cannot reach the API at ${API_BASE}.\n\n` +
+      `Cannot reach the API (${where}).\n\n` +
         `1) Backend (repo root, venv activated):\n` +
         `   python -m uvicorn app.main:app --reload --host 127.0.0.1 --port 8000\n\n` +
-        `2) If the API is not on ${API_BASE}, create frontend/.env.local:\n` +
-        `   VITE_API_URL=http://127.0.0.1:8000\n` +
-        `   (no trailing slash; match your Uvicorn host/port)\n\n` +
-        `3) Restart the frontend: npm run dev\n\n` +
+        `2) Restart the frontend so Vite picks up the dev proxy: npm run dev\n\n` +
+        `3) Optional: in frontend/.env.local set VITE_API_URL=http://127.0.0.1:8000 (no slash) to skip the proxy.\n\n` +
         `4) Open http://127.0.0.1:8000/docs — if that fails, the API is not running.`
     )
   }
@@ -37,7 +76,11 @@ export async function apiJson<T>(
     })
   } catch (e) {
     if (e instanceof DOMException && e.name === 'AbortError') {
-      throw new Error(`Request timed out (${timeoutMs / 1000}s). Is the backend running?`)
+      throw new Error(
+        `Request timed out after ${timeoutMs / 1000}s (frontend limit). ` +
+          `The API may still be working — slide generation and exports often need 60–180s; pass a larger timeout to apiJson(). ` +
+          `If the server were unreachable you would usually see a connection error instead.`
+      )
     }
     throw wrapNetworkError(e)
   } finally {
@@ -45,7 +88,7 @@ export async function apiJson<T>(
   }
   if (!res.ok) {
     const text = await res.text()
-    throw new Error(text || `${res.status} ${res.statusText}`)
+    throw new Error(parseHttpErrorBody(text, res.status, res.statusText))
   }
   return res.json() as Promise<T>
 }
@@ -65,7 +108,7 @@ export async function apiUpload(
   }
   if (!res.ok) {
     const text = await res.text()
-    throw new Error(text || `${res.status}`)
+    throw new Error(parseHttpErrorBody(text, res.status, res.statusText))
   }
   return res.json()
 }
@@ -79,7 +122,7 @@ export async function apiFormJson<T>(path: string, formData: FormData): Promise<
   }
   if (!res.ok) {
     const text = await res.text()
-    throw new Error(text || `${res.status}`)
+    throw new Error(parseHttpErrorBody(text, res.status, res.statusText))
   }
   return res.json() as Promise<T>
 }
@@ -106,7 +149,7 @@ export async function* apiStream<T>(
   }
   if (!res.ok) {
     const text = await res.text()
-    throw new Error(text || `${res.status} ${res.statusText}`)
+    throw new Error(parseHttpErrorBody(text, res.status, res.statusText))
   }
 
   const reader = res.body!.getReader()
@@ -143,7 +186,7 @@ export async function apiDownload(
   }
   if (!res.ok) {
     const text = await res.text()
-    throw new Error(text || `${res.status} ${res.statusText}`)
+    throw new Error(parseHttpErrorBody(text, res.status, res.statusText))
   }
 
   const disposition = res.headers.get('content-disposition') || ''
@@ -157,21 +200,34 @@ export async function apiDownload(
 /** POST JSON, return binary (e.g. PPTX / Moodle XML). Parses filename from Content-Disposition when present. */
 export async function apiPostBlob(
   path: string,
-  body: object
+  body: object,
+  /** Omit for no client-side abort (legacy). Set for long jobs (e.g. Playwright PPTX). */
+  timeoutMs?: number
 ): Promise<{ blob: Blob; filename: string }> {
+  const controller = timeoutMs != null ? new AbortController() : null
+  const timer =
+    timeoutMs != null ? window.setTimeout(() => controller!.abort(), timeoutMs) : undefined
   let res: Response
   try {
     res = await fetch(`${API_BASE}${path}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
+      signal: controller?.signal,
     })
   } catch (e) {
+    if (timeoutMs != null && e instanceof DOMException && e.name === 'AbortError') {
+      throw new Error(
+        `Request timed out after ${timeoutMs / 1000}s (frontend limit). Try a larger timeout for apiPostBlob().`
+      )
+    }
     throw wrapNetworkError(e)
+  } finally {
+    if (timer !== undefined) window.clearTimeout(timer)
   }
   if (!res.ok) {
     const text = await res.text()
-    throw new Error(text || `${res.status} ${res.statusText}`)
+    throw new Error(parseHttpErrorBody(text, res.status, res.statusText))
   }
   let filename = 'download'
   const cd = res.headers.get('Content-Disposition')

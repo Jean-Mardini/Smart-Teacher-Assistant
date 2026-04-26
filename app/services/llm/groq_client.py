@@ -13,8 +13,19 @@ import json
 import logging
 import os
 import re
+import time
 from pathlib import Path
 from typing import Optional
+
+try:
+    from openai import APIError, RateLimitError
+except ImportError:  # pragma: no cover
+
+    class APIError(Exception):
+        """Placeholder when openai is not installed."""
+
+    class RateLimitError(APIError):
+        """Placeholder when openai is not installed."""
 
 logger = logging.getLogger(__name__)
 
@@ -125,23 +136,140 @@ def _extract_json(text: str) -> str:
     return match.group(0)
 
 
+def max_slide_source_chars() -> int:
+    """Upper bound on source characters sent to Groq for slide generation.
+
+    Free / on-demand Groq tiers enforce a low **tokens-per-minute** budget; long
+    documents plus the slide system prompt exceed that quickly. Override with
+    ``GROQ_SLIDE_SOURCE_MAX_CHARS`` (e.g. 12000 on paid tiers).
+    """
+    raw = (os.getenv("GROQ_SLIDE_SOURCE_MAX_CHARS") or "").strip()
+    if raw.isdigit():
+        return max(1500, min(int(raw), 200_000))
+    return 5000
+
+
+def truncate_text_for_slide_prompt(text: str) -> tuple[str, bool]:
+    """Return ``(text_for_prompt, was_truncated)`` for slide LLM calls."""
+    cap = max_slide_source_chars()
+    t = (text or "").strip()
+    if len(t) <= cap:
+        return t, False
+    head = t[:cap].rstrip()
+    last_break = max(head.rfind("\n\n"), head.rfind(". "))
+    if last_break > int(cap * 0.5):
+        head = head[:last_break].rstrip()
+    note = (
+        "\n\n[… Excerpt ends here: document was truncated for the model size limit. "
+        "Ground every slide in the text above only.]\n"
+    )
+    return head + note, True
+
+
+def max_quiz_source_chars() -> int:
+    """Cap characters from the document sent to Groq for quiz generation (TPM / context)."""
+    raw = (os.getenv("GROQ_QUIZ_SOURCE_MAX_CHARS") or "").strip()
+    if raw.isdigit():
+        return max(2_000, min(int(raw), 200_000))
+    return 18_000
+
+
+def truncate_text_for_quiz_prompt(text: str) -> tuple[str, bool]:
+    """Return ``(text_for_prompt, was_truncated)`` for quiz LLM calls."""
+    cap = max_quiz_source_chars()
+    t = (text or "").strip()
+    if len(t) <= cap:
+        return t, False
+    head = t[:cap].rstrip()
+    last_break = max(head.rfind("\n\n"), head.rfind(". "))
+    if last_break > int(cap * 0.5):
+        head = head[:last_break].rstrip()
+    note = (
+        "\n\n[… Document truncated for the quiz model limit. "
+        "Write every question only from the text above.]\n"
+    )
+    return head + note, True
+
+
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 
+_RETRY_AFTER_HINT = re.compile(r"try again in ([\d.]+)\s*s", re.IGNORECASE)
+
+
+def _groq_rate_limit_delay_seconds(exc: Exception) -> float | None:
+    """Parse suggested wait from Groq / OpenAI error (headers or message body)."""
+    resp = getattr(exc, "response", None)
+    if resp is not None:
+        headers = getattr(resp, "headers", None) or {}
+        for key in ("retry-after", "Retry-After"):
+            raw = headers.get(key)
+            if raw is not None:
+                try:
+                    return float(raw)
+                except (TypeError, ValueError):
+                    pass
+    m = _RETRY_AFTER_HINT.search(str(exc))
+    if m:
+        return float(m.group(1))
+    return None
+
+
 def _chat(system: str, user: str, temperature: float = 0.2) -> str:
-    client = _get_client()
-    response = client.chat.completions.create(
-        model=_get_model(),
-        temperature=temperature,
-        messages=[
-            {"role": "system", "content": system},
-            {"role": "user", "content": user},
-        ],
-    )
-    if not response.choices:
-        raise ValueError("Empty response from Groq API.")
-    return response.choices[0].message.content or ""
+    """Chat completion with retries on Groq TPM / rate limits (common on on_demand tier)."""
+    max_attempts = max(1, min(int(os.getenv("GROQ_RATE_LIMIT_RETRIES", "12")), 40))
+    max_sleep = float(os.getenv("GROQ_RATE_LIMIT_MAX_WAIT_SEC", "120"))
+    fallback = float(os.getenv("GROQ_RATE_LIMIT_FALLBACK_SEC", "2.5"))
+
+    for attempt in range(max_attempts):
+        try:
+            client = _get_client()
+            response = client.chat.completions.create(
+                model=_get_model(),
+                temperature=temperature,
+                messages=[
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": user},
+                ],
+            )
+            if not response.choices:
+                raise ValueError("Empty response from Groq API.")
+            return response.choices[0].message.content or ""
+        except RateLimitError as exc:
+            if attempt >= max_attempts - 1:
+                raise
+            delay = _groq_rate_limit_delay_seconds(exc)
+            if delay is None:
+                delay = min(max_sleep, fallback * (attempt + 1))
+            else:
+                delay = min(max_sleep, max(1.0, delay))
+            logger.warning(
+                "Groq rate limit on chat completion (%s/%s); sleeping %.1fs then retrying.",
+                attempt + 1,
+                max_attempts,
+                delay,
+            )
+            time.sleep(delay)
+        except APIError as exc:
+            if getattr(exc, "status_code", None) != 429:
+                raise
+            if attempt >= max_attempts - 1:
+                raise
+            delay = _groq_rate_limit_delay_seconds(exc)
+            if delay is None:
+                delay = min(max_sleep, fallback * (attempt + 1))
+            else:
+                delay = min(max_sleep, max(1.0, delay))
+            logger.warning(
+                "Groq HTTP 429 on chat completion (%s/%s); sleeping %.1fs then retrying.",
+                attempt + 1,
+                max_attempts,
+                delay,
+            )
+            time.sleep(delay)
+
+    raise RuntimeError("_chat exhausted retries without returning")  # pragma: no cover
 
 
 def call_llm_json(system: str, user: str, temperature: float = 0.2) -> dict:
@@ -154,6 +282,34 @@ def call_llm_json(system: str, user: str, temperature: float = 0.2) -> dict:
         repair_user = f"Fix the following to be valid JSON ONLY.\n\n{content}"
         fixed = _chat(repair_system, repair_user, temperature=0.0)
         return json.loads(_extract_json(fixed))
+
+
+def call_llm_json_object(system: str, user: str, temperature: float = 0.25) -> dict:
+    """Chat completion with ``response_format=json_object`` — reliable dict root for quiz-style tasks."""
+    client = _get_client()
+    response = client.chat.completions.create(
+        model=_get_model(),
+        response_format={"type": "json_object"},
+        temperature=temperature,
+        messages=[
+            {"role": "system", "content": system},
+            {"role": "user", "content": user},
+        ],
+    )
+    if not response.choices:
+        raise ValueError("Empty response from Groq API.")
+    content = (response.choices[0].message.content or "").strip() or "{}"
+    try:
+        out = json.loads(content)
+        return out if isinstance(out, dict) else {}
+    except json.JSONDecodeError:
+        logger.warning("Groq json_object response was not valid JSON; trying brace extract")
+        try:
+            out = json.loads(_extract_json(content))
+            return out if isinstance(out, dict) else {}
+        except Exception:
+            logger.warning("Quiz JSON parse failed after json_object", exc_info=True)
+            return {}
 
 
 def call_llm_json_payload(

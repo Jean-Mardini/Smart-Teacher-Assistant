@@ -178,8 +178,8 @@ function BoldLine({ text }: { text: string }) {
   )
 }
 
-function SlideImg({ src, compact }: { src: string; compact?: boolean }) {
-  if (!shouldDisplaySlideImage(src)) return null
+function SlideImg({ src, compact, slideIndex }: { src: string; compact?: boolean; slideIndex?: number }) {
+  if (!shouldDisplaySlideImage(src, slideIndex)) return null
   return (
     <img
       src={src}
@@ -348,7 +348,7 @@ function SlideCard({
   const bullets = slide.bullets ?? []
   const img = slide.image
   const iconName = slide.icon ?? undefined
-  const showImg = shouldDisplaySlideImage(img)
+  const showImg = shouldDisplaySlideImage(img, index)
 
   const titleStyle: CSSProperties = {
     margin: 0,
@@ -390,7 +390,7 @@ function SlideCard({
         {imgFirst ? (
           <>
             <div style={{ flex: '0 0 54%', minWidth: 0 }}>
-              <SlideImg src={img} />
+              <SlideImg src={img} slideIndex={index} />
             </div>
             <div style={{ ...flexGrow }}>
               <SlideTitle slideIndex={index} title={title} iconName={iconName} h2Style={titleStyle} />
@@ -404,7 +404,7 @@ function SlideCard({
               <BulletList bullets={bullets} slide={slide} iconName={iconName} />
             </div>
             <div style={{ flex: '0 0 54%', minWidth: 0 }}>
-              <SlideImg src={img} />
+              <SlideImg src={img} slideIndex={index} />
             </div>
           </>
         )}
@@ -428,7 +428,7 @@ function SlideCard({
           </div>
           {showImg ? (
             <div style={{ width: '100%', maxWidth: 880, marginBottom: 18 }}>
-              <SlideImg src={img} />
+              <SlideImg src={img} slideIndex={index} />
             </div>
           ) : null}
           <div style={{ ...cardsGridColumns(2) }}>
@@ -467,7 +467,7 @@ function SlideCard({
         <div style={slideMainGrow}>
           <SlideTitle slideIndex={index} title={title} iconName={iconName} h2Style={{ ...titleStyle, flex: '0 0 auto' }} />
           <div style={{ flex: '0 0 46%', minHeight: 0 }}>
-            <SlideImg src={img} />
+            <SlideImg src={img} slideIndex={index} />
           </div>
           <div style={flexGrow}>
             <BulletList bullets={bullets} slide={slide} iconName={iconName} />
@@ -496,7 +496,7 @@ function SlideCard({
       <div style={shell}>
         <div style={slideMainGrow}>
           <div style={{ flex: '0 0 62%', minHeight: 0 }}>
-            <SlideImg src={img} />
+            <SlideImg src={img} slideIndex={index} />
           </div>
           <SlideTitle slideIndex={index} title={title} iconName={iconName} h2Style={titleStyle} />
           <BulletList bullets={bullets.slice(0, 4)} slide={slide} iconName={iconName} />
@@ -514,7 +514,7 @@ function SlideCard({
         <div style={slideBodyCentered}>
           {showImg ? (
             <div style={{ width: '100%', maxWidth: 720, marginBottom: 16 }}>
-              <SlideImg src={img} />
+              <SlideImg src={img} slideIndex={index} />
             </div>
           ) : null}
           <div style={titleCenterBlock}>
@@ -574,7 +574,7 @@ function SlideCard({
           </div>
           {showImg ? (
             <div style={{ marginTop: 18, width: 280, maxWidth: '100%' }}>
-              <SlideImg src={img} compact />
+              <SlideImg src={img} slideIndex={index} compact />
             </div>
           ) : null}
         </div>
@@ -599,7 +599,7 @@ function SlideCard({
           </div>
           {showImg ? (
             <div style={{ marginTop: 18, width: 220, maxWidth: '100%' }}>
-              <SlideImg src={img} compact />
+              <SlideImg src={img} slideIndex={index} compact />
             </div>
           ) : null}
         </div>
@@ -634,7 +634,7 @@ function SlideCard({
           </div>
           {showImg ? (
             <div style={{ marginTop: 18, width: '100%', maxWidth: 520 }}>
-              <SlideImg src={img} compact />
+              <SlideImg src={img} slideIndex={index} compact />
             </div>
           ) : null}
         </div>
@@ -661,7 +661,7 @@ function SlideCard({
           >
             {showImg ? (
               <div style={{ width: 200, flexShrink: 0 }}>
-                <SlideImg src={img} compact />
+                <SlideImg src={img} slideIndex={index} compact />
               </div>
             ) : null}
             <div
@@ -705,7 +705,7 @@ function SlideCard({
           </div>
           {showImg ? (
             <div style={{ marginTop: 20, width: 260, maxWidth: '100%' }}>
-              <SlideImg src={img} compact />
+              <SlideImg src={img} slideIndex={index} compact />
             </div>
           ) : null}
         </div>
@@ -735,7 +735,7 @@ function SlideCard({
           </div>
           {showImg ? (
             <div style={{ width: 300, maxWidth: '100%', marginTop: 20 }}>
-              <SlideImg src={img} compact />
+              <SlideImg src={img} slideIndex={index} compact />
             </div>
           ) : null}
         </div>
@@ -800,7 +800,7 @@ function SlideCard({
           </div>
           {showImg ? (
             <div style={{ marginTop: 18, width: '100%', maxWidth: 420 }}>
-              <SlideImg src={img} compact />
+              <SlideImg src={img} slideIndex={index} compact />
             </div>
           ) : null}
         </div>
@@ -854,7 +854,7 @@ function SlideCard({
           </div>
           {showImg ? (
             <div style={{ marginTop: 18, width: 240, maxWidth: '100%' }}>
-              <SlideImg src={img} compact />
+              <SlideImg src={img} slideIndex={index} compact />
             </div>
           ) : null}
         </div>
@@ -885,7 +885,7 @@ function SlideCard({
           </div>
           {showImg ? (
             <div style={{ marginTop: 18, width: '100%', maxWidth: 400 }}>
-              <SlideImg src={img} compact />
+              <SlideImg src={img} slideIndex={index} compact />
             </div>
           ) : null}
         </div>
@@ -912,7 +912,7 @@ function SlideCard({
         </div>
         {showImg ? (
           <div style={{ position: 'absolute', bottom: 28, right: 40, width: 200 }}>
-            <SlideImg src={img} compact />
+            <SlideImg src={img} slideIndex={index} compact />
           </div>
         ) : null}
       </div>
@@ -939,7 +939,7 @@ function SlideCard({
       <div style={slideMainGrow}>
         <div style={{ display: 'flex', flex: 1, gap: 28, minHeight: 0, alignItems: 'flex-start' }}>
           <div style={{ flex: '0 0 54%', minWidth: 0 }}>
-            <SlideImg src={img} />
+            <SlideImg src={img} slideIndex={index} />
           </div>
           <div style={flexGrow}>
             <SlideTitle slideIndex={index} title={title} iconName={iconName} h2Style={titleStyle} />

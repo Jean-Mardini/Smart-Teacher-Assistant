@@ -27,7 +27,7 @@ from app.services.agents.slide_image_generator import (
     live_slide_placeholder_data_url,
     slide_image_parallel_workers,
 )
-from app.services.llm.groq_client import call_llm_json
+from app.services.llm.groq_client import call_llm_json, truncate_text_for_slide_prompt
 
 
 def _slide_image_png_fingerprint(data_url: str) -> bytes:
@@ -480,42 +480,62 @@ def _partition_text_only_bullets(
     return pill, left_b, right_b, footer
 
 
-def _system_prompt(n_slides: int, *, short_bullets: bool = False) -> str:
+def _system_prompt(
+    n_slides: int,
+    *,
+    short_bullets: bool = False,
+    presentation_detail: str = "standard",
+) -> str:
+    deep = (presentation_detail or "").strip().lower() == "deep"
     if short_bullets:
         # Live + exported PPTX: syllabus-style density, one JSON string per bullet (may wrap in PowerPoint).
-        bullet_rules = (
-            "- Each bullets array: **4 to 6** items (prefer **5** when the source is rich). "
-            "Format **`**Keyword** — explanation`** (em dash). "
-            "Each bullet is **one line in JSON** but **teaching-detailed**: about **24–58 words** where the source allows — "
-            "define the term, state **why it matters for the argument**, add **one concrete anchor** from the text "
-            "(name, number, comparison, figure, study, quote, or method), and when helpful add **implication** "
-            "(who is affected, what fails if we ignore it, or how it connects to the next slide’s idea). "
-            "If the source lacks an example for a point, expand with caveats and careful inference **without inventing facts**. "
-            "Do not prefix with Step 1 / Step 2. One bullet per idea — no duplicate ideas."
-        )
+        if deep:
+            bullet_rules = (
+                "- Each bullets array: **5 to 6** items when the excerpt is rich (never fewer than **5** unless the source is thin). "
+                "Format **`**Keyword** — explanation`** (em dash). "
+                "Each bullet is **one line in JSON**, **32–68 words** where the source allows — define terms, contrast alternatives, "
+                "and tie claims to **specific** anchors from the excerpt (names, quantities, figure types, study designs, equations in words). "
+                "On **every** slide (except a very thin source), include **at least one** bullet that states a **limitation, trade-off, failure mode, "
+                "or common pitfall** when the material supports it; if not supported, substitute a carefully scoped **assumption** the reader should verify. "
+                "Slides 2 through n−1: end **one** bullet with a short clause that **bridges** toward the next slide’s theme (no new facts). "
+                "Final slide: **synthesis** — weave prior slide titles into takeaways the excerpt can justify (no new sources). "
+                "Do not prefix with Step 1 / Step 2. One bullet per idea — no duplicate ideas."
+            )
+        else:
+            bullet_rules = (
+                "- Each bullets array: **4 to 6** items (prefer **5** when the source is rich). "
+                "Format **`**Keyword** — explanation`** (em dash). "
+                "Each bullet is **one line in JSON** but **teaching-detailed**: about **24–58 words** where the source allows — "
+                "define the term, state **why it matters for the argument**, add **one concrete anchor** from the text "
+                "(name, number, comparison, figure, study, quote, or method), and when helpful add **implication** "
+                "(who is affected, what fails if we ignore it, or how it connects to the next slide’s idea). "
+                "If the source lacks an example for a point, expand with caveats and careful inference **without inventing facts**. "
+                "Do not prefix with Step 1 / Step 2. One bullet per idea — no duplicate ideas."
+            )
     else:
-        bullet_rules = (
-            "- Each bullets array: **4 to 6** items. Each bullet ONE line, about **16–40 words**, format **Keyword — explanation** "
-            "(em dash). Include **definition**, a **source-tied concrete detail**, and a **short “so what”** when possible. "
-            "Do not prefix with Step 1 / Step 2. No paragraphs as a single bullet — still one continuous line per bullet."
-        )
+        if deep:
+            bullet_rules = (
+                "- Each bullets array: **5 to 6** items. Each bullet ONE line, about **22–48 words**, format **Keyword — explanation** "
+                "(em dash). Include **definition**, **contrast or boundary condition** when the source allows, a **source-tied concrete detail**, "
+                "and a **short “so what”**. Final slide summarizes threads visible in earlier titles. "
+                "Do not prefix with Step 1 / Step 2. No paragraphs as a single bullet — still one continuous line per bullet."
+            )
+        else:
+            bullet_rules = (
+                "- Each bullets array: **4 to 6** items. Each bullet ONE line, about **16–40 words**, format **Keyword — explanation** "
+                "(em dash). Include **definition**, a **source-tied concrete detail**, and a **short “so what”** when possible. "
+                "Do not prefix with Step 1 / Step 2. No paragraphs as a single bullet — still one continuous line per bullet."
+            )
     return f"""You are an expert instructional designer. Return ONLY valid JSON (no markdown fences).
 
 Schema:
 {{"slides":[{{"title":"string","bullets":["string",...],"image_prompt":"string","type":"auto"}}]}}
 
-IMAGE PROMPTS (critical — fed to Hugging Face text-to-image for **every** slide — no web image URLs):
-- Every slide **must** include **image_prompt** describing the **exact** teaching visual for that slide only (analyze
-  **title + bullets**). Images are **generated by the server** via HF Inference — phrase prompts like real art direction.
-- **Preferred style words** (use liberally): realistic scientific illustration; highly detailed; educational diagram or
-  educational biology illustration; clean background; precise visualization.
-- Good examples:
-  • "realistic scientific illustration of photosynthesis process, plant leaves absorbing sunlight, chloroplast activity, detailed biology diagram"
-  • "realistic diagram of plant roots absorbing water, carbon dioxide entering leaves, sunlight on plant, educational biology illustration"
-  • "plants releasing oxygen into air in sunlight, realistic nature scene, educational scientific illustration"
-- Include **four or more concrete nouns** from this slide (or synonyms). No readable letters, captions, or UI in the imagined image.
-- **Banned**: empty or vague prompts, cartoon mascots, unrelated abstract blobs, decorative backgrounds that ignore the topic.
-- **Variation**: change composition (diagram vs scene vs macro) slide-to-slide — never reuse one generic visualization for every slide.
+IMAGE PROMPTS (HF text-to-image per slide; no URLs):
+- Each **image_prompt**: one precise teaching visual for that slide from **title + bullets**; art-direction phrasing.
+- Style hints: realistic scientific illustration; educational diagram; clean background; highly detailed.
+- Use **four+ concrete nouns** from the slide; no readable text in the image. Vary diagram vs scene vs macro across slides.
+- Ban vague prompts, mascots, or decorative blobs unrelated to the topic.
 
 Rules:
 - Exactly {n_slides} slides.
@@ -525,16 +545,32 @@ Rules:
 """
 
 
-def _user_prompt(document_text: str, deck_title: str | None, n_slides: int) -> str:
+def _user_prompt(
+    document_text: str,
+    deck_title: str | None,
+    n_slides: int,
+    *,
+    presentation_detail: str = "standard",
+) -> str:
     title = (deck_title or "Presentation").strip()
+    clipped, _trunc = truncate_text_for_slide_prompt(document_text)
+    deep = (presentation_detail or "").strip().lower() == "deep"
+    depth_tail = ""
+    if deep:
+        depth_tail = (
+            "\n\nAudience: advanced undergraduate or professional seminar. "
+            "Build a clear **arc** across slides (motivation → core ideas → implications → synthesis). "
+            "Prefer **precise** vocabulary from the excerpt over generic slogans. "
+            "If the excerpt is short, keep claims modest and say what is **not** established by the text."
+        )
     return f"""Deck title: {title}
 
 Source material (ground bullets and titles ONLY in facts implied here — do not invent unrelated topics):
 ---
-{document_text[:100_000]}
+{clipped}
 ---
 
-Produce exactly {n_slides} slides as JSON. Bullets should read like speaker-ready notes for university or advanced secondary teaching — dense enough to export directly to slides."""
+Produce exactly {n_slides} slides as JSON. Bullets should read like speaker-ready notes for university or advanced secondary teaching — dense enough to export directly to slides.{depth_tail}"""
 
 
 def call_structured_slides(
@@ -543,11 +579,13 @@ def call_structured_slides(
     deck_title: str | None,
     *,
     short_bullets: bool = False,
+    presentation_detail: str = "standard",
 ) -> list[dict[str, Any]]:
+    deep = (presentation_detail or "").strip().lower() == "deep"
     raw = call_llm_json(
-        _system_prompt(n_slides, short_bullets=short_bullets),
-        _user_prompt(document_text, deck_title, n_slides),
-        temperature=0.4,
+        _system_prompt(n_slides, short_bullets=short_bullets, presentation_detail=presentation_detail),
+        _user_prompt(document_text, deck_title, n_slides, presentation_detail=presentation_detail),
+        temperature=0.42 if deep else 0.4,
     )
     raw_slides = raw.get("slides") if isinstance(raw.get("slides"), list) else []
     specs: list[GammaSlideSpec] = []
@@ -1434,9 +1472,16 @@ def run_live_slides_json(
     n_slides: int,
     deck_title: str | None,
     image_style: str,
+    presentation_detail: str = "standard",
 ) -> dict[str, Any]:
     """Groq (short bullets) → diverse text layouts + **no consecutive repeats**; **one hero AI image on slide 1 only**."""
-    slides = call_structured_slides(document_text, n_slides, deck_title, short_bullets=True)
+    slides = call_structured_slides(
+        document_text,
+        n_slides,
+        deck_title,
+        short_bullets=True,
+        presentation_detail=presentation_detail,
+    )
     assign_layouts(slides)
     for s in slides:
         lay = s.get("layout") or "split_left"
@@ -1562,7 +1607,7 @@ def build_ppt_from_live_slides(slides_payload: list[dict[str, Any]]) -> bytes:
 
 def run_gamma_slide_pipeline(document_text: str, n_slides: int, deck_title: str | None) -> tuple[bytes, list[str]]:
     """End-to-end: structured LLM → layouts → HF images → PPTX bytes. Returns (pptx_bytes, layouts_used)."""
-    slides = call_structured_slides(document_text, n_slides, deck_title)
+    slides = call_structured_slides(document_text, n_slides, deck_title, presentation_detail="standard")
     assign_layouts(slides)
     for s in slides:
         lay = s.get("layout") or "split_left"

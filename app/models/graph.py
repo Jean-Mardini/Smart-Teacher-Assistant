@@ -24,6 +24,7 @@ class GraphInvokeRequest(BaseModel):
     n_questions: int = 5
     n_mcq: Optional[int] = None
     n_short_answer: Optional[int] = None
+    n_true_false: Optional[int] = None
     quiz_difficulty: str = "medium"
     submission_text: str = ""
     rubric_items: list[dict[str, Any]] = Field(default_factory=list)

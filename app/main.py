@@ -24,7 +24,6 @@ from app.api.routers import (
     documents,
     evaluation,
     generate_slides,
-    generator,
     graph,
     rag,
 )
@@ -81,4 +80,3 @@ app.include_router(documents.router)
 app.include_router(rag.router)
 app.include_router(graph.router)
 app.include_router(evaluation.router, prefix="/evaluation", tags=["evaluation"])
-app.include_router(generator.router)

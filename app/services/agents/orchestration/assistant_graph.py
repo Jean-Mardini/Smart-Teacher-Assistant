@@ -225,21 +225,25 @@ async def node_quiz(state: TeachingAssistantState) -> dict[str, Any]:
 
     n_mcq_raw = state.get("n_mcq")
     n_short_raw = state.get("n_short_answer")
-    if n_mcq_raw is not None or n_short_raw is not None:
-        n_mcq = max(0, min(20, int(n_mcq_raw or 0)))
-        n_short = max(0, min(20, int(n_short_raw or 0)))
+    n_tf_raw = state.get("n_true_false")
+    if n_mcq_raw is not None or n_short_raw is not None or n_tf_raw is not None:
+        n_mcq = max(0, min(100, int(n_mcq_raw or 0)))
+        n_short = max(0, min(100, int(n_short_raw or 0)))
+        n_tf = max(0, min(100, int(n_tf_raw or 0)))
     else:
-        total = max(1, min(25, int(state.get("n_questions") or 5)))
+        total = max(1, min(100, int(state.get("n_questions") or 5)))
         n_mcq = min(total, (total * 3 + 2) // 5)
         n_short = total - n_mcq
-    if n_mcq + n_short < 1:
-        n_mcq, n_short = 3, 2
+        n_tf = 0
+    if n_mcq + n_short + n_tf < 1:
+        n_mcq, n_short, n_tf = 3, 2, 0
 
     result = await run_quiz(
         doc,
         n_mcq=n_mcq,
         n_short_answer=n_short,
         difficulty=str(state.get("quiz_difficulty") or "medium"),
+        n_true_false=n_tf,
     )
     data = result.model_dump()
     n = len(data.get("quiz") or [])

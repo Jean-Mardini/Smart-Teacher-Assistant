@@ -20,6 +20,10 @@ type SummaryResult = {
 
 const MAX_DOCS = 10
 
+/** Summarization runs multiple LLM calls; default apiJson 12s is too short. */
+const SUMMARIZE_TIMEOUT_MS = 300_000
+const SUMMARIZE_EXPORT_TIMEOUT_MS = 120_000
+
 const LENGTH_OPTS = [
   { id: 'short', label: 'Short', hint: 'Brief overview' },
   { id: 'medium', label: 'Medium', hint: 'Balanced depth' },
@@ -31,6 +35,8 @@ export function SummarizePage() {
   const [extraIds, setExtraIds] = useState<Set<string>>(() => new Set())
   const [shelf, setShelf] = useState<DocRow[]>([])
   const [length, setLength] = useState('medium')
+  /** Auto: server uses RAG for multi-doc / very long text; on/off forces behaviour. */
+  const [ragMode, setRagMode] = useState<'auto' | 'on' | 'off'>('auto')
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [result, setResult] = useState<SummaryResult | null>(null)
@@ -79,10 +85,17 @@ export function SummarizePage() {
     setResult(null)
     setExportError(null)
     try {
-      const res = await apiJson<SummaryResult>('/agents/summarize', {
-        method: 'POST',
-        body: JSON.stringify({ document_ids: ids, length }),
-      })
+      const payload: Record<string, unknown> = { document_ids: ids, length }
+      if (ragMode === 'on') payload.use_rag = true
+      if (ragMode === 'off') payload.use_rag = false
+      const res = await apiJson<SummaryResult>(
+        '/agents/summarize',
+        {
+          method: 'POST',
+          body: JSON.stringify(payload),
+        },
+        SUMMARIZE_TIMEOUT_MS,
+      )
       setResult(res)
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Summarize failed')
@@ -96,19 +109,23 @@ export function SummarizePage() {
     setExportError(null)
     setExportBusy(format)
     try {
-      const { blob, filename } = await apiPostBlob('/agents/summarize/export', {
-        format,
-        summary: result.summary ?? '',
-        key_points: result.key_points ?? [],
-        action_items: result.action_items ?? [],
-        formulas: result.formulas ?? [],
-        glossary: result.glossary ?? [],
-        source_documents: result.source_documents ?? [],
-        total_pages: result.total_pages ?? 0,
-        chunk_count: result.chunk_count ?? 0,
-        image_notes: result.image_notes ?? [],
-        processing_notes: result.processing_notes ?? [],
-      })
+      const { blob, filename } = await apiPostBlob(
+        '/agents/summarize/export',
+        {
+          format,
+          summary: result.summary ?? '',
+          key_points: result.key_points ?? [],
+          action_items: result.action_items ?? [],
+          formulas: result.formulas ?? [],
+          glossary: result.glossary ?? [],
+          source_documents: result.source_documents ?? [],
+          total_pages: result.total_pages ?? 0,
+          chunk_count: result.chunk_count ?? 0,
+          image_notes: result.image_notes ?? [],
+          processing_notes: result.processing_notes ?? [],
+        },
+        SUMMARIZE_EXPORT_TIMEOUT_MS,
+      )
       triggerDownload(blob, filename)
     } catch (e) {
       setExportError(e instanceof Error ? e.message : 'Export failed')
@@ -123,7 +140,8 @@ export function SummarizePage() {
     <div className="studio-route summarize-page">
       <h1 className="page-title">Summarize</h1>
       <p className="page-sub">
-        Turn one or more supported files into a structured summary. The API needs <code>GROQ_API_KEY</code> in{' '}
+        Turn one or more supported files into a structured summary. Large or merged documents can take a minute or
+        more while the model works — stay on this page until it finishes. The API needs <code>GROQ_API_KEY</code> in{' '}
         <code>.env</code>.
       </p>
 
@@ -136,8 +154,9 @@ export function SummarizePage() {
               Upload in the <strong>Library</strong> if needed, then choose the file that anchors this summary.
             </p>
             <DocPicker
-              value={docId}
-              onChange={(id) => {
+              value={docId ? [docId] : []}
+              onChange={(ids) => {
+                const id = ids[0] ?? ''
                 setDocId(id)
                 setExtraIds((prev) => {
                   if (!id) return new Set()
@@ -212,6 +231,25 @@ export function SummarizePage() {
                 </button>
               ))}
             </div>
+          </div>
+
+          <div style={{ marginTop: '1rem' }}>
+            <span className="summarize-field-label">Summarization input</span>
+            <p style={{ margin: '0.35rem 0 0.5rem', fontSize: '0.86rem', color: 'var(--ink-soft)' }}>
+              <strong>Auto</strong> uses indexed retrieval for several large sources or very long combined text.{' '}
+              <strong>Full text</strong> always sends extracted text (may hit size limits).
+            </p>
+            <select
+              id="summarize-rag"
+              className="field"
+              style={{ width: '100%', maxWidth: '16rem' }}
+              value={ragMode}
+              onChange={(e) => setRagMode(e.target.value as 'auto' | 'on' | 'off')}
+            >
+              <option value="auto">Auto (recommended)</option>
+              <option value="on">RAG (retrieved passages)</option>
+              <option value="off">Full extracted text only</option>
+            </select>
           </div>
 
           <div className="summarize-stat">

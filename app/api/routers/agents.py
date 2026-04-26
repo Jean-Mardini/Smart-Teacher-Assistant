@@ -1,6 +1,20 @@
+import json
+import logging
 import os
 
 from fastapi import APIRouter, HTTPException, Response
+from pydantic import ValidationError
+
+try:
+    from openai import APIError, RateLimitError
+except ImportError:  # pragma: no cover — summarizer already requires openai via Groq client
+
+    class APIError(Exception):
+        """Placeholder when openai is not installed."""
+
+    class RateLimitError(APIError):
+        """Placeholder when openai is not installed."""
+
 
 # ----------- MODELS -----------
 from app.models.agents import (
@@ -14,7 +28,8 @@ from app.models.agents import (
 )
 
 # ----------- AGENTS -----------
-from app.services.agents.summarizer_agent import run_summarizer
+from app.services.agents.summarizer_agent import SummarizerLimitError, run_summarizer
+from app.services.llm.groq_client import LLMConfigurationError
 from app.services.agents.summary_export import (
     summary_payload_to_docx_bytes,
     summary_payload_to_pdf_bytes,
@@ -24,7 +39,7 @@ from app.services.agents.slide_export import slide_deck_to_pptx_bytes
 from app.services.agents.slide_agent import run_slides
 from app.services.agents.quiz_agent import run_quiz
 from app.services.knowledge.indexing_pipeline import get_local_document_by_id
-from app.services.agents.slide_input import document_dict_for_slide_request
+from app.services.agents.slide_input import document_dict_for_quiz_request, document_dict_for_slide_request
 from app.services.agents.slide_image_generator import (
     active_image_model_label,
     get_slide_image_provider,
@@ -32,6 +47,18 @@ from app.services.agents.slide_image_generator import (
 )
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
+
+
+def _summarize_upstream_detail(exc: Exception) -> str:
+    """Short, user-facing message from Groq / OpenAI client errors."""
+    body = getattr(exc, "body", None)
+    if isinstance(body, dict):
+        err = body.get("error")
+        if isinstance(err, dict) and err.get("message"):
+            return str(err["message"])[:2000]
+    msg = str(exc).strip() or type(exc).__name__
+    return msg[:2000]
 
 
 async def get_document(doc_id: str):
@@ -52,9 +79,44 @@ async def get_documents(doc_ids: list[str]):
 async def summarize(req: SummaryRequest):
     try:
         docs = await get_documents(req.resolved_document_ids())
-        return await run_summarizer(docs, length=req.length)
-    except ValueError as exc:
+        return await run_summarizer(docs, length=req.length, use_rag=req.use_rag)
+    except SummarizerLimitError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except json.JSONDecodeError as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"The model returned invalid JSON: {exc}",
+        ) from exc
+    except ValueError as exc:
+        # ``JSONDecodeError`` is a ``ValueError`` subclass — handled above first.
+        raise HTTPException(
+            status_code=502,
+            detail=str(exc) or "The summarizer received an unexpected response from the model.",
+        ) from exc
+    except LLMConfigurationError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except RateLimitError as exc:
+        raise HTTPException(
+            status_code=429,
+            detail=_summarize_upstream_detail(exc) or "Groq rate limit exceeded. Wait a minute and try again.",
+        ) from exc
+    except APIError as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=_summarize_upstream_detail(exc) or "The language model provider returned an error.",
+        ) from exc
+    except ValidationError as exc:
+        logger.warning("Summary payload failed validation after normalization: %s", exc)
+        raise HTTPException(
+            status_code=422,
+            detail="The model returned a summary in an unexpected format. Try again or shorten the document.",
+        ) from exc
+    except Exception as exc:  # pragma: no cover — safety net with actionable detail for self-hosted use
+        logger.exception("Summarize failed")
+        raise HTTPException(
+            status_code=500,
+            detail=str(exc) or type(exc).__name__,
+        ) from exc
 
 
 @router.post("/agents/summarize/export")
@@ -161,23 +223,27 @@ async def export_slides_pptx(req: SlideRequest):
 # ---------------------------
 @router.post("/agents/quiz", response_model=QuizResult)
 async def quiz(req: QuizRequest):
-    doc = await get_document(req.document_id)
+    doc = await document_dict_for_quiz_request(req)
     return await run_quiz(
         doc,
         n_mcq=req.n_mcq,
         n_short_answer=req.n_short_answer,
         difficulty=req.difficulty,
+        total_points=req.total_points,
+        n_true_false=req.n_true_false,
     )
 
 
 @router.post("/agents/quiz/export/moodle-xml")
 async def export_quiz_moodle_xml(req: QuizRequest):
-    doc = await get_document(req.document_id)
+    doc = await document_dict_for_quiz_request(req)
     result = await run_quiz(
         doc,
         n_mcq=req.n_mcq,
         n_short_answer=req.n_short_answer,
         difficulty=req.difficulty,
+        total_points=req.total_points,
+        n_true_false=req.n_true_false,
     )
     title = doc.get("title", "quiz")
     safe_title = "".join(ch if ch.isalnum() else "_" for ch in title).strip("_") or "quiz"

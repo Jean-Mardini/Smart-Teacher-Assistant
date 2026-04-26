@@ -196,19 +196,6 @@ const SLIDE_TEMPLATES = [
 
 type TemplateId = (typeof SLIDE_TEMPLATES)[number]['id']
 
-const IMAGE_ART_PRESETS = [
-  { id: 'vector_science', label: 'Science deck (vector)' },
-  { id: 'illustration', label: 'Illustration' },
-  { id: 'photo', label: 'Photo' },
-  { id: 'abstract', label: 'Abstract' },
-  { id: '3d', label: '3D' },
-  { id: 'line_art', label: 'Line art' },
-  { id: 'diagram', label: 'Diagram / infographic' },
-  { id: 'custom', label: 'Custom…' },
-] as const
-
-type ImagePresetId = (typeof IMAGE_ART_PRESETS)[number]['id']
-
 type CreationMode = 'generate' | 'paste' | 'template' | 'import'
 
 const CREATION_CARDS: {
@@ -271,11 +258,10 @@ export function SlidesPage() {
   const [importUrl, setImportUrl] = useState('')
   const [sourceTitle, setSourceTitle] = useState('')
   const [nSlides, setNSlides] = useState(5)
+  const [presentationDetail, setPresentationDetail] = useState<'standard' | 'deep'>('standard')
   const [template, setTemplate] = useState<TemplateId>('academic_default')
   const [themeSearch, setThemeSearch] = useState('')
   const [themeFilter, setThemeFilter] = useState<ThemeFilterId | null>(null)
-  const [imagePreset, setImagePreset] = useState<ImagePresetId>('vector_science')
-  const [customImageStyle, setCustomImageStyle] = useState('')
   const [loading, setLoading] = useState(false)
   const [exporting, setExporting] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -310,11 +296,11 @@ export function SlidesPage() {
 
   /** Body for ``POST /generate-slides`` (live React deck — same sources, no template). */
   function liveSlidesBody(): Record<string, unknown> {
-    const img = imagePreset === 'custom' ? customImageStyle.trim() || 'vector_science' : imagePreset
     const base: Record<string, unknown> = {
       n_slides: nSlides,
       deck_title: sourceTitle.trim() || undefined,
-      image_style: img,
+      image_style: 'vector_science',
+      presentation_detail: presentationDetail,
     }
     if (creationMode === 'generate') {
       base.source_text = promptLine.trim()
@@ -364,10 +350,14 @@ export function SlidesPage() {
     setLiveDeck(null)
     setLiveWarnings(null)
     try {
-      const res = await apiJson<LiveSlidesResponse>('/generate-slides', {
-        method: 'POST',
-        body: JSON.stringify(liveSlidesBody()),
-      })
+      const res = await apiJson<LiveSlidesResponse>(
+        '/generate-slides',
+        {
+          method: 'POST',
+          body: JSON.stringify(liveSlidesBody()),
+        },
+        180_000,
+      )
       assertLiveSlidesHaveImages(res)
       await preloadLiveSlideImages(res)
       if (import.meta.env.DEV) {
@@ -395,9 +385,13 @@ export function SlidesPage() {
     assertLiveSlidesHaveImages(liveDeck)
     setExporting(true)
     try {
-      const { blob, filename } = await apiPostBlob('/generate-slides/export-pptx', {
-        slides: liveDeck.slides,
-      })
+      const { blob, filename } = await apiPostBlob(
+        '/generate-slides/export-pptx',
+        {
+          slides: liveDeck.slides,
+        },
+        240_000,
+      )
       triggerDownload(blob, filename.endsWith('.pptx') ? filename : `${filename}.pptx`)
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Export failed')
@@ -508,7 +502,11 @@ export function SlidesPage() {
 
         {(creationMode === 'template' || creationMode === 'import') && (
           <>
-            <DocPicker value={docId} onChange={setDocId} accept=".pdf,.docx,.pptx,.txt,.md" />
+            <DocPicker
+              value={docId ? [docId] : []}
+              onChange={(ids) => setDocId(ids[0] ?? '')}
+              accept=".pdf,.docx,.pptx,.txt,.md"
+            />
             {creationMode === 'import' && (
               <div className="field" style={{ marginTop: '1rem' }}>
                 <label htmlFor="url">Or import from URL</label>
@@ -898,33 +896,36 @@ export function SlidesPage() {
             min={1}
             max={20}
             value={nSlides}
-            onChange={(e) => setNSlides(Number(e.target.value))}
+            onChange={(e) => {
+              const raw = Number(e.target.value)
+              if (!Number.isFinite(raw)) return
+              setNSlides(Math.min(20, Math.max(1, Math.round(raw))))
+            }}
           />
+          <p style={{ margin: '0.35rem 0 0', fontSize: '0.82rem', color: 'var(--ink-soft)' }}>
+            Live generation accepts 1–20 slides (server validation).
+          </p>
         </div>
         <div className="field">
-          <label htmlFor="art">AI image art style</label>
-          <select id="art" value={imagePreset} onChange={(e) => setImagePreset(e.target.value as ImagePresetId)}>
-            {IMAGE_ART_PRESETS.map((p) => (
-              <option key={p.id} value={p.id}>
-                {p.label}
-              </option>
-            ))}
+          <label htmlFor="pres-depth">Presentation depth</label>
+          <select
+            id="pres-depth"
+            value={presentationDetail}
+            onChange={(e) => setPresentationDetail(e.target.value as 'standard' | 'deep')}
+          >
+            <option value="standard">Standard — balanced teaching bullets</option>
+            <option value="deep">Deep — longer bullets, trade-offs, arc, synthesis on last slide</option>
           </select>
-          <p style={{ margin: '0.35rem 0 0', fontSize: '0.85rem', color: 'var(--ink-soft)' }}>
-            Each slide image is generated from that slide’s title and bullets (HF / xAI / OpenAI when configured, otherwise
-            local placeholders). Preview uses Gamma-style layouts in the browser; Export builds PowerPoint on the server
-            from the same slide data (python-pptx layouts — editable text and images). Use Custom for your own art-direction words.
+          <p style={{ margin: '0.35rem 0 0', fontSize: '0.82rem', color: 'var(--ink-soft)' }}>
+            Deep mode requests more text from Groq (bigger payload; may hit rate limits on free tiers).
           </p>
-          {imagePreset === 'custom' && (
-            <input
-              id="ist"
-              type="text"
-              style={{ marginTop: '0.5rem' }}
-              value={customImageStyle}
-              onChange={(e) => setCustomImageStyle(e.target.value)}
-              placeholder="e.g. watercolor botanical textbook plate, soft light"
-            />
-          )}
+        </div>
+        <div className="field">
+          <span className="summarize-field-label">Slide images</span>
+          <p style={{ margin: '0.35rem 0 0', fontSize: '0.85rem', color: 'var(--ink-soft)' }}>
+            Images use the automatic science-style vector look from each slide’s title and bullets (<code>vector_science</code>
+            on the server). HF / xAI / OpenAI when configured; otherwise local placeholders.
+          </p>
         </div>
         <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.75rem', alignItems: 'center' }}>
           <button
@@ -965,7 +966,9 @@ export function SlidesPage() {
         <p style={{ margin: '0.5rem 0 0', fontSize: '0.82rem', color: 'var(--ink-soft)', maxWidth: '44rem' }}>
           Slides preview at 1280×720 (16:9). Exported .pptx uses server-side HTML/CSS → Playwright screenshots at
           1920×1080 (Gamma-style full-bleed slides). If Playwright is unavailable, the API falls back to python-pptx
-          layout export.
+          layout export. Only slide 1 gets an AI/stock image attempt (slides 2–N are always simple color tiles by design,
+          not full photos). If slide 1’s image fails, the server tries Pollinations, then optional stock keys, then a
+          local gradient preview.
         </p>
       </div>
 

@@ -73,6 +73,14 @@ class SummaryRequest(BaseModel):
     document_id: Optional[str] = None
     document_ids: List[str] = Field(default_factory=list)
     length: SummaryLength = "medium"
+    use_rag: Optional[bool] = Field(
+        default=None,
+        description=(
+            "Summarization input: None=auto (RAG when several large sources or very long combined text), "
+            "True=always build input from vector retrieval over selected ids, "
+            "False=always use full extracted text."
+        ),
+    )
 
     @model_validator(mode="after")
     def validate_document_selection(self):
@@ -251,27 +259,55 @@ class SlideRequest(BaseModel):
 # ---------------------------
 
 Difficulty = Literal["easy", "medium", "hard"]
-QType = Literal["mcq", "short_answer"]
+QType = Literal["mcq", "short_answer", "true_false"]
 
 
 class QuizRequest(BaseModel):
-    document_id: str
+    """Quiz from a **library document**, **pasted text**, a **one-line prompt**, or a **URL** (same resolution order as slides)."""
+
+    document_id: Optional[str] = None
+    source_text: Optional[str] = None
+    """Raw notes, outline, or a one-line topic — sole source when set (unless ``source_url`` is set after text in resolver)."""
+
+    source_title: Optional[str] = None
+    """Optional quiz / category title when using ``source_text`` or ``source_url``."""
+
+    source_url: Optional[str] = None
+    """Fetch this http(s) page and extract text when set (same rules as :class:`SlideRequest`)."""
+
     difficulty: Difficulty = "medium"
-    n_mcq: int = Field(default=3, ge=0, le=20, description="Multiple-choice questions (four options each).")
+    total_points: int = Field(
+        default=10,
+        ge=1,
+        le=2000,
+        description="Total marks for the whole quiz; split across generated questions.",
+    )
+    n_mcq: int = Field(default=3, ge=0, le=100, description="Multiple-choice questions (four options each).")
     n_short_answer: int = Field(
         default=2,
         ge=0,
-        le=20,
+        le=100,
         description="Short free-text / sentence-style questions.",
+    )
+    n_true_false: int = Field(
+        default=0,
+        ge=0,
+        le=100,
+        description="True/false statements (two options: True and False).",
     )
 
     @model_validator(mode="after")
-    def validate_quiz_counts(self) -> "QuizRequest":
-        total = self.n_mcq + self.n_short_answer
+    def validate_quiz_request(self) -> "QuizRequest":
+        has_doc = bool((self.document_id or "").strip())
+        has_text = bool((self.source_text or "").strip())
+        has_url = bool((self.source_url or "").strip())
+        if not has_doc and not has_text and not has_url:
+            raise ValueError("Provide document_id, source_text, or source_url.")
+        total = self.n_mcq + self.n_short_answer + self.n_true_false
         if total < 1:
-            raise ValueError("n_mcq + n_short_answer must be at least 1.")
-        if total > 25:
-            raise ValueError("n_mcq + n_short_answer must be at most 25.")
+            raise ValueError("n_mcq + n_short_answer + n_true_false must be at least 1.")
+        if total > 100:
+            raise ValueError("n_mcq + n_short_answer + n_true_false must be at most 100.")
         return self
 
 
@@ -284,7 +320,13 @@ class QuizQuestion(BaseModel):
     explanation: str
     difficulty: Difficulty
     source_refs: List[str]
+    points: int = Field(default=1, ge=1, le=2000, description="Marks for this question.")
 
 
 class QuizResult(BaseModel):
     quiz: List[QuizQuestion]
+    quiz_title: Optional[str] = Field(
+        default=None,
+        max_length=500,
+        description="Display title from the resolved document (includes optional source_title override).",
+    )

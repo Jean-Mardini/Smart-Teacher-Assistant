@@ -914,7 +914,21 @@ export function GradePage() {
   useEffect(() => { void bootstrap() }, [])
 
   useEffect(() => {
-    const state = location.state as { rubric?: RubricItem[]; origin?: string } | null
+    if (!error) return
+    requestAnimationFrame(() => {
+      document.getElementById('grade-flash-banner')?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+    })
+  }, [error])
+
+  useEffect(() => {
+    const state = location.state as {
+      rubric?: RubricItem[]
+      origin?: string
+      teacher_key_text?: string
+      suggested_total_points?: number
+      result_title_hint?: string
+      importMessage?: string
+    } | null
     if (!state?.rubric?.length) return
     if (state.origin === 'teacher_key') {
       setTeacherItemsWithSync(state.rubric)
@@ -923,8 +937,19 @@ export function GradePage() {
       setAssignmentItemsWithSync(state.rubric)
       setGradeSource('assignment')
     }
+    if (typeof state.teacher_key_text === 'string' && state.teacher_key_text.trim()) {
+      setTeacherKeyText(state.teacher_key_text)
+    }
+    const stp = state.suggested_total_points
+    if (typeof stp === 'number' && Number.isFinite(stp)) {
+      const rounded = Math.round(stp)
+      if (rounded >= 1 && rounded <= 2000) setTotalPoints(rounded)
+    }
+    if (typeof state.result_title_hint === 'string' && state.result_title_hint.trim()) {
+      setSingleTitle(state.result_title_hint.trim())
+    }
     setTab('grade')
-    setMessage('Rubric loaded from Generate.')
+    setMessage(state.importMessage || 'Rubric imported.')
     window.history.replaceState({}, '')
   }, [location.state])
 
@@ -957,7 +982,17 @@ export function GradePage() {
     }
   }
 
-  async function refreshHistory(overrides?: Partial<{ dateFrom: string; dateTo: string; search: string; historyType: 'all' | 'single' | 'batch'; selectedRecordId: string; selectedBatchId: string }>) {
+  async function refreshHistory(
+    overrides?: Partial<{
+      dateFrom: string
+      dateTo: string
+      search: string
+      historyType: 'all' | 'single' | 'batch'
+      selectedRecordId: string
+      selectedBatchId: string
+    }>,
+    options?: { quiet?: boolean },
+  ): Promise<boolean> {
     try {
       const dateFrom = overrides?.dateFrom ?? historyDateFrom
       const dateTo = overrides?.dateTo ?? historyDateTo
@@ -981,8 +1016,12 @@ export function GradePage() {
       const nextBatchIndex = selectedBatchId ? nextBatches.findIndex((batch) => batch.batch_id === selectedBatchId) : -1
       setSelectedHistoryIndex(nextRecordIndex >= 0 ? nextRecordIndex : 0)
       setSelectedHistoryBatchIndex(nextBatchIndex >= 0 ? nextBatchIndex : 0)
+      return true
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'Failed to load history.')
+      if (!options?.quiet) {
+        setError(e instanceof Error ? e.message : 'Failed to load history.')
+      }
+      return false
     }
   }
 
@@ -1133,6 +1172,12 @@ export function GradePage() {
       setError('Please upload, select, or paste reference material before grading because one or more criteria use reference or hybrid grounding.')
       return
     }
+    if (!singleSubmissionText.trim() && singleSubmissionDocIds.length === 0) {
+      setError(
+        'Add submission text (paste or upload a file above) and/or select at least one library document that contains the student work. The server needs text to grade.',
+      )
+      return
+    }
     setLoading(true); setError(null); setMessage(null); setGradeResult(null)
     try {
       const res = await apiJson<GradeResponse>(
@@ -1153,9 +1198,27 @@ export function GradePage() {
         },
         180_000
       )
-      setGradeResult(res.record || null)
-      if (saveHistory) await refreshHistory()
-      setMessage('Graded successfully.')
+      const record = res.record ?? null
+      setGradeResult(record)
+      if (!record) {
+        setError(
+          'The API returned no grading record. Check the browser Network tab for POST /evaluation/grade, confirm the backend is running, and verify GROQ_API_KEY in the API environment.',
+        )
+        return
+      }
+      if (saveHistory) {
+        const okHist = await refreshHistory(undefined, { quiet: true })
+        setMessage(
+          okHist
+            ? 'Graded successfully.'
+            : 'Graded successfully. History could not refresh — open the History tab and press Refresh.',
+        )
+      } else {
+        setMessage('Graded successfully.')
+      }
+      requestAnimationFrame(() => {
+        document.getElementById('grade-result-anchor')?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+      })
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Failed to grade submission.')
     } finally {
@@ -1200,8 +1263,12 @@ export function GradePage() {
       const records = res.records || []
       setBatchResults(records)
       setSelectedBatchIndex(0)
-      if (saveHistory) await refreshHistory()
-      setMessage(`Batch grading done: ${records.length} submission(s)${res.batch_name ? ` in "${res.batch_name}"` : ''}.`)
+      let histNote = ''
+      if (saveHistory) {
+        const okHist = await refreshHistory(undefined, { quiet: true })
+        if (!okHist) histNote = ' History could not refresh — open the History tab and press Refresh.'
+      }
+      setMessage(`Batch grading done: ${records.length} submission(s)${res.batch_name ? ` in "${res.batch_name}"` : ''}.${histNote}`)
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Failed to grade batch submissions.')
     } finally {
@@ -1469,7 +1536,11 @@ export function GradePage() {
         Upload a teacher key or assignment to generate a rubric, then grade student submissions — single or batch.
       </p>
 
-      {error && <div className="error" style={{ whiteSpace: 'pre-wrap' }}>{error}</div>}
+      {error && (
+        <div id="grade-flash-banner" className="error" style={{ whiteSpace: 'pre-wrap' }}>
+          {error}
+        </div>
+      )}
       {message && <div className="success">{message}</div>}
 
       <div className="tabs">
@@ -1726,6 +1797,7 @@ export function GradePage() {
             </button>
           </div>
 
+          <div id="grade-result-anchor" style={{ scrollMarginTop: '1rem' }} />
           <ResultCard record={gradeResult} onApply={applySingleReview} onSave={saveHistory ? saveReviewedRecord : undefined} saving={savingReview} />
 
           {/* Batch grading */}

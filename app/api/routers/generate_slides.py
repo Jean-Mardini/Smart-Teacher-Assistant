@@ -62,6 +62,7 @@ async def generate_slides(req: GenerateSlidesRequest):
             req.n_slides,
             deck_title,
             req.image_style.strip() or "vector_science",
+            req.presentation_detail,
         )
     except RuntimeError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc

@@ -29,6 +29,20 @@ def _append_answer(parent: Element, text: str, fraction: str, feedback: str = ""
     feedback_text.text = feedback or ""
 
 
+def _append_truefalse_answers(parent: Element, correct_is_true: bool, explanation: str) -> None:
+    """Moodle ``truefalse`` questions: first answer is always ``true``, second ``false``."""
+    exp = explanation or ""
+    true_frac = "100" if correct_is_true else "0"
+    false_frac = "0" if correct_is_true else "100"
+    for value, frac in (("true", true_frac), ("false", false_frac)):
+        answer = SubElement(parent, "answer", {"fraction": frac, "format": "moodle_auto_format"})
+        text = SubElement(answer, "text")
+        text.text = value
+        feedback_node = SubElement(answer, "feedback", {"format": "html"})
+        feedback_text = SubElement(feedback_node, "text")
+        feedback_text.text = exp if (value == "true" and correct_is_true) or (value == "false" and not correct_is_true) else ""
+
+
 def _format_general_feedback(item: dict) -> str:
     explanation = (item.get("explanation") or "").strip()
     source_refs = [ref.strip() for ref in item.get("source_refs", []) if isinstance(ref, str) and ref.strip()]
@@ -63,12 +77,25 @@ def quiz_to_moodle_xml(quiz: list[dict], category: str = "Smart Teacher Assistan
 
     for index, item in enumerate(quiz, start=1):
         q_type = item.get("type", "mcq")
-        moodle_type = "multichoice" if q_type == "mcq" else "shortanswer"
+        if q_type == "mcq":
+            moodle_type = "multichoice"
+        elif q_type == "true_false":
+            moodle_type = "truefalse"
+        else:
+            moodle_type = "shortanswer"
         question = SubElement(root, "question", {"type": moodle_type})
 
         name = SubElement(question, "name")
         name_text = SubElement(name, "text")
         name_text.text = f"{category} Q{index}"
+
+        grade_raw = item.get("points", 1)
+        try:
+            grade_val = max(0.0, float(grade_raw))
+        except (TypeError, ValueError):
+            grade_val = 1.0
+        default_grade = SubElement(question, "defaultgrade")
+        default_grade.text = f"{grade_val:.7f}".rstrip("0").rstrip(".")
 
         _append_text_node(question, "questiontext", item.get("question", ""))
         _append_text_node(question, "generalfeedback", _format_general_feedback(item))
@@ -91,6 +118,9 @@ def quiz_to_moodle_xml(quiz: list[dict], category: str = "Smart Teacher Assistan
                 fraction = "100" if option_index == correct_index else "0"
                 feedback = explanation if option_index == correct_index else ""
                 _append_answer(question, _strip_option_label(option), fraction, feedback)
+        elif moodle_type == "truefalse":
+            correct_is_true = int(item.get("answer_index") or 0) == 0
+            _append_truefalse_answers(question, correct_is_true, str(item.get("explanation") or ""))
         else:
             use_case = SubElement(question, "usecase")
             use_case.text = "0"

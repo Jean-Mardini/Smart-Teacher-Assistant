@@ -9,7 +9,7 @@ from typing import Any
 
 from app.models.agents import ALL_SLIDE_LAYOUT_IDS, SlideDeckResult, SlideImageAsset
 from app.services.agents.slide_image_generator import attach_generated_images
-from app.services.llm.groq_client import call_llm_json
+from app.services.llm.groq_client import call_llm_json, truncate_text_for_slide_prompt
 
 log = logging.getLogger(__name__)
 
@@ -328,6 +328,12 @@ async def run_slides(
     image_notes: list[str] = []
     image_catalog = _build_image_catalog(doc_json)
     full_text = build_full_text(doc_json, image_notes)
+    full_text, truncated = truncate_text_for_slide_prompt(full_text)
+    if truncated:
+        image_notes.append(
+            "Long document truncated for slide generation (Groq size limits). "
+            "Set GROQ_SLIDE_SOURCE_MAX_CHARS in the environment to allow a larger excerpt."
+        )
 
     if not full_text.strip():
         return SlideDeckResult(

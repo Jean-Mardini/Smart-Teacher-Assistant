@@ -475,7 +475,7 @@ with slides_tab:
     )
     top_left, top_right = st.columns([1, 1])
     with top_left:
-        n_slides = st.slider("Number of slides", min_value=3, max_value=20, value=5)
+        n_slides = st.slider("Number of slides", min_value=1, max_value=20, value=5)
     with top_right:
         slide_template = st.selectbox(
             "Slide template (LLM prompt)",
@@ -615,18 +615,20 @@ with slides_tab:
 with quiz_tab:
     st.subheader("Quiz Generation")
     st.caption("Quiz generation uses the first selected document.")
-    qc1, qc2 = st.columns(2)
+    qc1, qc2, qc3 = st.columns(3)
     with qc1:
         n_mcq = st.slider("Multiple choice (MCQ)", min_value=0, max_value=15, value=3)
     with qc2:
+        n_true_false = st.slider("True / false", min_value=0, max_value=15, value=0)
+    with qc3:
         n_short_answer = st.slider("Short answer (sentence)", min_value=0, max_value=15, value=2)
-    if n_mcq + n_short_answer < 1:
-        st.warning("Choose at least one question (MCQ and/or short answer).")
+    if n_mcq + n_short_answer + n_true_false < 1:
+        st.warning("Choose at least one question (MCQ, true/false, and/or short answer).")
     difficulty = st.selectbox("Difficulty", ["easy", "medium", "hard"], index=1)
 
     if st.button("Generate Quiz", type="primary", key="quiz_button"):
-        if n_mcq + n_short_answer < 1:
-            st.error("Need at least one MCQ or short-answer question.")
+        if n_mcq + n_short_answer + n_true_false < 1:
+            st.error("Need at least one MCQ, true/false, or short-answer question.")
         else:
             with st.spinner("Generating quiz..."):
                 result, api_error = safe_api_call(
@@ -637,6 +639,7 @@ with quiz_tab:
                         "document_id": primary_document_id,
                         "n_mcq": n_mcq,
                         "n_short_answer": n_short_answer,
+                        "n_true_false": n_true_false,
                         "difficulty": difficulty,
                     },
                 )
@@ -652,6 +655,9 @@ with quiz_tab:
                     with st.container(border=True):
                         st.markdown(f"**Q{index}. {question['question']}**")
                         if question["type"] == "mcq":
+                            for option in question.get("options", []):
+                                st.write(option)
+                        elif question["type"] == "true_false":
                             for option in question.get("options", []):
                                 st.write(option)
                         st.write(f"Answer: {question.get('answer_text', '')}")

@@ -53,7 +53,8 @@ export function HomePage() {
           <p className="error" style={{ marginTop: '1rem' }}>
             Connect the backend:{' '}
             <code>python -m uvicorn app.main:app --reload --host 127.0.0.1 --port 8000</code> — UI expects{' '}
-            <code>{API_BASE}</code> (set <code>VITE_API_URL</code> in <code>frontend/.env.local</code> if different).
+            <code>{API_BASE || '(dev: Vite proxy → http://127.0.0.1:8000)'}</code> (set{' '}
+            <code>VITE_API_URL</code> in <code>frontend/.env.local</code> if different).
             <br />
             <small>{err}</small>
           </p>

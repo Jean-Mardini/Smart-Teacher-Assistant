@@ -20,6 +20,7 @@ class TeachingAssistantState(TypedDict, total=False):
     n_questions: int
     n_mcq: int
     n_short_answer: int
+    n_true_false: int
     quiz_difficulty: str
     submission_text: str
     rubric_items: list[dict[str, Any]]

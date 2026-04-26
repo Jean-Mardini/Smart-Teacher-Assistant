@@ -17,7 +17,7 @@ const LENGTH_OPTS = [
 export function ChatPage() {
   const [question, setQuestion] = useState('')
   const [ids, setIds] = useState('')
-  const [pickId, setPickId] = useState('')
+  const [pickIds, setPickIds] = useState<string[]>([])
   const [length, setLength] = useState('medium')
   const [topK, setTopK] = useState(4)
   const [temperature, setTemperature] = useState(0.2)
@@ -34,8 +34,7 @@ export function ChatPage() {
         .split(',')
         .map((s) => s.trim())
         .filter(Boolean)
-      const picked = pickId.trim()
-      const document_ids = picked ? [picked] : fromInput
+      const document_ids = pickIds.length > 0 ? pickIds : fromInput
       const res = await apiJson<ChatResponse>('/chat', {
         method: 'POST',
         body: JSON.stringify({
@@ -71,14 +70,7 @@ export function ChatPage() {
             <p className="summarize-lede">
               Choose an active document to scope retrieval, or leave unset and use document IDs in the question panel.
             </p>
-            <DocPicker
-              value={pickId}
-              onChange={(id) => {
-                setPickId(id)
-                setIds(id)
-              }}
-              accept=".pdf,.docx,.pptx,.txt,.md"
-            />
+            <DocPicker value={pickIds} onChange={setPickIds} accept=".pdf,.docx,.pptx,.txt,.md" />
           </div>
 
           <div className="studio-panel">
@@ -96,10 +88,10 @@ export function ChatPage() {
                 rows={5}
               />
             </div>
-            {pickId.trim() ? (
+            {pickIds.length > 0 ? (
               <p style={{ margin: '0 0 0.75rem', fontSize: '0.9rem', color: 'var(--ink-soft)' }}>
-                Scoped to <code style={{ fontSize: '0.88em' }}>{pickId}</code>. To search the whole library or combine IDs,
-                set <strong>Active document</strong> to “Select…” first.
+                Scoped to <code style={{ fontSize: '0.88em' }}>{pickIds.join(', ')}</code>. To search the whole library or
+                combine IDs, clear the library selection (Ctrl/Cmd-click to deselect).
               </p>
             ) : (
               <div className="field" style={{ marginBottom: 0 }}>

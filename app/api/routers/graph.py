@@ -23,6 +23,7 @@ def _to_state(req: GraphInvokeRequest) -> dict:
         "n_questions": req.n_questions,
         "n_mcq": req.n_mcq,
         "n_short_answer": req.n_short_answer,
+        "n_true_false": req.n_true_false,
         "quiz_difficulty": req.quiz_difficulty,
         "submission_text": req.submission_text,
         "rubric_items": list(req.rubric_items),
