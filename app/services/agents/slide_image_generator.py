@@ -63,6 +63,11 @@ def _hf_fallback_after_hf_failure_enabled() -> bool:
     return raw not in ("0", "false", "no", "off")
 
 
+def _slide_generation_fast() -> bool:
+    """Matches slide_agent: shorter LLM copy + fewer HF T2I attempts when on (default)."""
+    return (os.getenv("SLIDE_GENERATION_FAST") or "1").strip().lower() not in ("0", "false", "no", "off")
+
+
 def _hf_retries_per_slide() -> int:
     try:
         return max(1, min(12, int((os.getenv("SLIDE_IMAGE_HF_RETRIES_PER_SLIDE") or "1").strip() or "1")))
@@ -807,6 +812,10 @@ def _generate_huggingface_image(prompt: str) -> tuple[bytes | None, str | None]:
     sw, sh = min(width, 768), min(height, 432)
     attempts.append(("short_prompt_sized", lambda: client.text_to_image(short_p, width=sw, height=sh)))
 
+    if _slide_generation_fast():
+        # Fewer sequential T2I trials per slide — first successes are usually enough; big win on deck export.
+        attempts = attempts[:2]
+
     fallback_model = (os.getenv("HF_IMAGE_FALLBACK_MODEL") or "").strip()
     last_exc: Exception | None = None
     for tag, fn in attempts:
@@ -1215,10 +1224,11 @@ def _generate_single_image(
         deck_slide_count=deck_slide_count,
     )
 
-    # 6+ slides: try compact Pollinations before HF — long slide-1 text often breaks HF first; short URL usually works.
+    # Medium+ decks: try compact Pollinations before HF — long slide-1 text often breaks HF first; short URL usually works.
+    poll_early_n = 4 if _slide_generation_fast() else 6
     if (
         deck_slide_count is not None
-        and deck_slide_count >= 6
+        and deck_slide_count >= poll_early_n
         and _pollinations_fallback_enabled()
         and not _pollinations_first_enabled()
     ):

@@ -20,6 +20,7 @@ import io
 import json
 import os
 import re
+import time
 import tempfile
 import zipfile
 from datetime import datetime
@@ -285,6 +286,19 @@ def _coerce_float(value: Any, default: float = 0.0) -> float:
         return float(value)
     except Exception:
         return default
+
+
+def _coerce_int_points(value: Any) -> int:
+    """Rubric max points as a non-negative int (handles null / missing / strings from JSON)."""
+    if value is None:
+        return 0
+    try:
+        f = float(value)
+        if f != f or not f < float("inf"):  # NaN or not finite
+            return 0
+        return max(0, int(f))
+    except (TypeError, ValueError, OverflowError):
+        return 0
 
 
 def normalize_result_record(record: Dict[str, Any]) -> Dict[str, Any]:
@@ -888,7 +902,7 @@ def generate_items_from_assignment(assignment_text: str, total_points: int) -> D
             "Use ai when general reasoning is enough.",
             "Use reference when course material or uploaded references should be the main basis.",
             "Use hybrid when both reasoning and reference grounding are useful.",
-            "Points must be integers summing exactly to target_total_points."
+            "Points must be integers summing exactly to target_total_points.",
         ],
         "output_json_schema": {
             "rubric_title": "string",
@@ -909,22 +923,28 @@ def generate_items_from_assignment(assignment_text: str, total_points: int) -> D
     return result
 
 
-def generate_items_from_teacher_key(teacher_key_text: str, total_points: int) -> Dict[str, Any]:
+def generate_items_from_teacher_key(
+    teacher_key_text: str,
+    total_points: int,
+    default_grounding: Optional[str] = None,
+) -> Dict[str, Any]:
+    dg = (default_grounding or "").strip().lower()
+    rules = [
+        "Generate open-response (QA) grading criteria from the teacher's pasted or uploaded questions and model answers.",
+        "Each item must include: name, description, expected_answer, points, grounding.",
+        "Every criterion is graded by understanding (semantic match to the model answer), not by letter or exact string match.",
+        "expected_answer should summarize the model answer or key ideas the student's response should cover.",
+        "grounding must be one of: ai, reference, hybrid (never empty).",
+        "Points must be integers summing exactly to target_total_points.",
+    ]
+    if dg in {"ai", "reference", "hybrid"}:
+        rules.append(f"Use grounding '{dg}' on every item unless the teacher key clearly needs a different grounding for a specific question.")
+
     payload = {
         "task": "generate_rubric_from_teacher_key",
         "teacher_key_text": teacher_key_text,
         "target_total_points": total_points,
-        "rules": [
-            "Generate grading items from the teacher key.",
-            "Each item must include: name, description, expected_answer, points, mode.",
-            "mode must be exact or conceptual.",
-            "If the item is MCQ, multiple-correct MCQ, select-all-that-apply, true/false, matching, fixed-answer, one-word answer, or direct comparison style, use mode=exact.",
-            "If the item is QA, explanation, open response, reasoning, or concept-based answer, use mode=conceptual.",
-            "For multiple-correct exact questions, expected_answer must include all correct options, for example 'A, C' or 'B and D'.",
-            "If mode is conceptual, include grounding with one of ai, reference, or hybrid.",
-            "If mode is exact, grounding must be empty.",
-            "Points must be integers summing exactly to target_total_points."
-        ],
+        "rules": rules,
         "output_json_schema": {
             "rubric_title": "string",
             "summary": ["string"],
@@ -934,14 +954,20 @@ def generate_items_from_teacher_key(teacher_key_text: str, total_points: int) ->
                     "description": "string",
                     "expected_answer": "string",
                     "points": "integer",
-                    "mode": "exact | conceptual",
-                    "grounding": "ai | reference | hybrid | empty-if-exact"
+                    "grounding": "ai | reference | hybrid",
                 }
             ]
         }
     }
     result = llm_json(payload, temperature=0.1)
     items = result.get("items", []) if isinstance(result, dict) else []
+    for it in items:
+        if not isinstance(it, dict):
+            continue
+        it["mode"] = "conceptual"
+        g = str(it.get("grounding", "")).strip().lower()
+        if g not in {"ai", "reference", "hybrid"}:
+            it["grounding"] = dg if dg in {"ai", "reference", "hybrid"} else "ai"
     result["items"] = normalize_points(items, total_points, "teacher_key")
     return result
 
@@ -1631,7 +1657,7 @@ def extract_student_answer_for_item(submission_text: str, item: Dict[str, Any], 
 
 
 def make_exact_result(item: Dict[str, Any], earned: float, rationale: str, student_answer: str) -> Dict[str, Any]:
-    points = int(item.get("points", 0))
+    points = _coerce_int_points(item.get("points"))
     return {
         "item_origin": "teacher_key",
         "name": item.get("name", ""),
@@ -1959,7 +1985,7 @@ def _grade_exact_items_via_llm(
 
     by_name = {r["name"]: r for r in out}
     return [
-        by_name.get(item["name"])
+        by_name.get(str(item.get("name", "") or "").strip())
         or make_exact_result(item, 0.0, "Answer not found in submission.", "")
         for item in exact_items
     ]
@@ -1967,12 +1993,108 @@ def _grade_exact_items_via_llm(
 # =========================================================
 # Fast grading
 # =========================================================
+def _max_chars_grade_prompt() -> int:
+    """Upper bound on student + teacher key text in one Groq grading call (TPM on on_demand tier)."""
+    raw = (os.getenv("GROQ_GRADE_PROMPT_MAX_CHARS") or "").strip()
+    if raw.isdigit():
+        return max(4_000, min(int(raw), 500_000))
+    return 12_000
+
+
+def _grade_items_per_llm_call() -> int | None:
+    """Rubric rows per Groq request. ``None`` = entire non-exact rubric in one call (fastest, most consistent).
+
+    Set ``GRADE_ITEMS_PER_LLM_CALL`` to a positive integer (e.g. 3) to split very large rubrics and reduce TPM spikes.
+    ``0`` or ``all`` means one call for the whole rubric.
+    """
+    raw = (os.getenv("GRADE_ITEMS_PER_LLM_CALL") or "0").strip().lower()
+    if raw in ("0", "", "all", "none"):
+        return None
+    if raw.isdigit():
+        v = int(raw)
+        if v <= 0:
+            return None
+        return max(1, min(v, 200))
+    return None
+
+
+def _grade_chunk_gap_seconds() -> float:
+    """Pause between chunked grading calls (only when ``GRADE_ITEMS_PER_LLM_CALL`` > 0)."""
+    raw = (os.getenv("GRADE_LLM_CHUNK_GAP_SEC") or "0").strip()
+    try:
+        return max(0.0, min(float(raw), 60.0))
+    except ValueError:
+        return 0.0
+
+
+def _truncate_grade_text(text: str, label: str) -> str:
+    t = (text or "").strip()
+    cap = _max_chars_grade_prompt()
+    if len(t) <= cap:
+        return t
+    head = t[:cap].rstrip()
+    last_break = max(head.rfind("\n\n"), head.rfind(". "))
+    if last_break > int(cap * 0.5):
+        head = head[:last_break].rstrip()
+    note = (
+        f"\n\n[… {label} truncated for model limits ({cap} chars); "
+        "grade only from the text above.]\n"
+    )
+    return head + note
+
+
+def build_grade_failure_result(
+    submission_text: str,
+    items: List[Dict[str, Any]],
+    error_message: str,
+) -> Dict[str, Any]:
+    """Deterministic result when grading cannot finish (batch resilience, UI feedback)."""
+    msg = (error_message or "Grading failed.").strip()[:800]
+    final_results: List[Dict[str, Any]] = []
+    total_earned = 0.0
+    total_possible = 0
+
+    for item in items:
+        if item.get("item_origin") == "teacher_key" and item.get("mode") == "exact":
+            r = make_exact_result(item, 0.0, msg, "")
+            final_results.append(r)
+            total_earned += float(r.get("earned_points", 0) or 0)
+            total_possible += _coerce_int_points(item.get("points"))
+            continue
+
+        pts = _coerce_int_points(item.get("points"))
+        total_possible += pts
+        final_results.append({
+            "item_origin": item.get("item_origin", ""),
+            "name": item.get("name", ""),
+            "description": item.get("description", ""),
+            "expected_answer": item.get("expected_answer", ""),
+            "points": pts,
+            "mode": item.get("mode", ""),
+            "grounding": item.get("grounding", ""),
+            "earned_points": 0.0,
+            "rationale": msg,
+            "suggestions": ["Retry grading after checking the API key, model, and network."],
+            "evidence": [],
+            "matched_key_ideas": [],
+            "missing_key_ideas": [],
+            "misconceptions": [],
+        })
+
+    return {
+        "overall_score": round(total_earned, 2),
+        "overall_out_of": total_possible,
+        "items_results": final_results,
+    }
+
+
 def grade_submission_fast(
     submission_text: str,
     items: List[Dict[str, Any]],
     teacher_key_text: str,
     reference_document_ids: Optional[List[str]] = None,
     reference_text: str = "",
+    batch_submission: bool = False,
 ) -> Dict[str, Any]:
     exact_items = [
         item for item in items
@@ -1992,62 +2114,108 @@ def grade_submission_fast(
                 by_name[name] = result
 
     if non_exact_items:
-        prepared_items = prepare_items_with_reference_context(
+        prepared_full = prepare_items_with_reference_context(
             non_exact_items,
             reference_document_ids=reference_document_ids,
             reference_text=reference_text,
         )
-
-        payload = {
-            "task": "grade_entire_submission",
-            "student_submission": submission_text,
-            "teacher_key_text": teacher_key_text,
-            "grading_items": prepared_items,
-            "rules": [
-                "Grade all items in a single pass.",
-                "Assignment-origin items do not use exact/conceptual mode. Grade them using their grounding only.",
-                "If an assignment-origin item grounding is ai, use reasoning.",
-                "If an assignment-origin item grounding is reference, prioritize reference_context.",
-                "If an assignment-origin item grounding is hybrid, use both reasoning and reference_context.",
-                "Teacher-key-origin conceptual items should grade by understanding, not exact wording.",
-                "For teacher-key-origin conceptual items: use grounding ai/reference/hybrid.",
-                "Return one result per item with earned_points, rationale, suggestions, evidence.",
-                "earned_points must be between 0 and that item's points.",
-                "Return overall_score and overall_out_of."
+        stu = _truncate_grade_text(submission_text, "Student submission")
+        tkey = _truncate_grade_text(teacher_key_text, "Teacher key")
+        if batch_submission:
+            # Adaptive: one Groq call when the rubric is small (fast). Larger rubrics use fewer, bigger chunks
+            # than before (was 2 rows + long gaps) so batch stays TPM-safe without taking many minutes.
+            n = len(prepared_full)
+            try:
+                single_max = max(1, min(int((os.getenv("GRADE_BATCH_SINGLE_CALL_MAX_ITEMS") or "10").strip() or "10"), 80))
+            except ValueError:
+                single_max = 10
+            override = (os.getenv("GRADE_BATCH_ITEMS_PER_CALL") or "").strip()
+            if override.isdigit() and int(override) > 0:
+                chunk_n = max(1, min(int(override), 80))
+                try:
+                    gap = max(0.0, float((os.getenv("GRADE_BATCH_CHUNK_GAP_SEC") or "0.35").strip() or "0.35"))
+                except ValueError:
+                    gap = 0.35
+            elif n <= single_max:
+                chunk_n = n
+                gap = 0.0
+            else:
+                chunk_n = max(4, min(8, (n + 2) // 3))
+                try:
+                    gap = max(0.0, float((os.getenv("GRADE_BATCH_CHUNK_GAP_SEC") or "0.35").strip() or "0.35"))
+                except ValueError:
+                    gap = 0.35
+        else:
+            chunk_n = _grade_items_per_llm_call()
+            gap = _grade_chunk_gap_seconds()
+        rules = [
+            "Assignment-origin items do not use exact/conceptual mode. Grade them using their grounding only.",
+            "If an assignment-origin item grounding is ai, use reasoning.",
+            "If an assignment-origin item grounding is reference, prioritize reference_context.",
+            "If an assignment-origin item grounding is hybrid, use both reasoning and reference_context.",
+            "Teacher-key-origin conceptual items should grade by understanding, not exact wording.",
+            "For teacher-key-origin conceptual items: use grounding ai/reference/hybrid.",
+            "Return one result per rubric row in grading_items with earned_points, rationale, suggestions, evidence.",
+            "earned_points must be between 0 and that item's points.",
+            "Return overall_score and overall_out_of for the rows in grading_items only (subset totals).",
+            "grading_items may be a subset of the full assignment rubric; only grade those rows.",
+            "ASSIGNMENT-ORIGIN ONLY (item_origin is assignment): be a skeptical grader. Default to the lower defensible score when evidence is thin; do not inflate.",
+            "ASSIGNMENT-ORIGIN ONLY: full points only for exceptional work that explicitly and completely satisfies the criterion with no gaps, vagueness, or missing sub-parts implied by the description.",
+            "ASSIGNMENT-ORIGIN ONLY: if the criterion implies multiple distinct elements, require clear evidence for each; partial coverage earns proportional credit in the lower half of the points band, not 'nearly full' scores.",
+            "ASSIGNMENT-ORIGIN ONLY: penalize padded length, generic platitudes, restating the assignment prompt, and topic-adjacent filler that does not directly prove the criterion.",
+            "ASSIGNMENT-ORIGIN ONLY: when awarding more than half of a row's points, quote or paraphrase concrete student wording in rationale or evidence for every such row.",
+            "ASSIGNMENT-ORIGIN ONLY: 'mostly right' or broadly on-topic should typically fall around 35–65% of that row's points, not 85–100%, unless the text is truly precise and complete.",
+            "TEACHER-KEY CONCEPTUAL ONLY (item_origin is teacher_key, mode is conceptual): keep the usual fair semantic standard — equivalent paraphrases and correct reasoning still earn credit; do not apply the assignment-only strictness above to these rows.",
+        ]
+        schema = {
+            "overall_score": "number",
+            "overall_out_of": "number",
+            "items_results": [
+                {
+                    "name": "string",
+                    "earned_points": "number",
+                    "rationale": "string",
+                    "suggestions": ["string"],
+                    "evidence": [{"quote": "string", "source": "string"}],
+                }
             ],
-            "output_json_schema": {
-                "overall_score": "number",
-                "overall_out_of": "number",
-                "items_results": [
-                    {
-                        "name": "string",
-                        "earned_points": "number",
-                        "rationale": "string",
-                        "suggestions": ["string"],
-                        "evidence": [{"quote": "string", "source": "string"}]
-                    }
-                ]
-            }
         }
+        if chunk_n is None or chunk_n >= len(prepared_full):
+            slices = [prepared_full]
+        else:
+            slices = [prepared_full[i : i + chunk_n] for i in range(0, len(prepared_full), chunk_n)]
 
-        res = llm_json(payload, temperature=0.1)
-        raw_results = res.get("items_results", []) if isinstance(res, dict) else []
-        for r in raw_results:
-            name = str(r.get("name", "")).strip()
-            if name:
-                by_name[name] = r
+        for idx, chunk in enumerate(slices):
+            if idx > 0 and gap > 0:
+                time.sleep(gap)
+            payload = {
+                "task": "grade_entire_submission",
+                "student_submission": stu,
+                "teacher_key_text": tkey,
+                "grading_items": chunk,
+                "rules": rules,
+                "output_json_schema": schema,
+            }
+            # temperature=0 and optional seed (Groq) improve repeatability; assignment strictness is rule-driven.
+            res = llm_json(payload, temperature=0.0)
+            raw_results = res.get("items_results", []) if isinstance(res, dict) else []
+            for r in raw_results:
+                name = str(r.get("name", "")).strip()
+                if name:
+                    by_name[name] = r
 
     final_results = []
     total_earned = 0.0
     total_possible = 0
 
     for item in items:
-        raw = by_name.get(item["name"], {})
+        item_name = str(item.get("name", "") or "").strip()
+        raw = by_name.get(item_name, {}) if item_name else {}
         if item.get("item_origin") == "teacher_key" and item.get("mode") == "exact":
             result = raw if raw else make_exact_result(item, 0.0, "Answer not found in submission.", "")
             earned = float(result.get("earned_points", 0) or 0)
             total_earned += earned
-            total_possible += int(item.get("points", 0))
+            total_possible += _coerce_int_points(item.get("points"))
             final_results.append(result)
             continue
 
@@ -2055,9 +2223,10 @@ def grade_submission_fast(
             earned = float(raw.get("earned_points", 0))
         except Exception:
             earned = 0.0
-        earned = max(0.0, min(float(item.get("points", 0)), earned))
+        row_max = float(_coerce_int_points(item.get("points")))
+        earned = max(0.0, min(row_max, earned))
         total_earned += earned
-        total_possible += int(item.get("points", 0))
+        total_possible += _coerce_int_points(item.get("points"))
 
         final_results.append({
             "item_origin": item.get("item_origin", ""),

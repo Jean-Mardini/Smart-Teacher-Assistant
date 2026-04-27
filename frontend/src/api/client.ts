@@ -57,34 +57,18 @@ function wrapNetworkError(err: unknown): Error {
   return err instanceof Error ? err : new Error(String(err))
 }
 
-export async function apiJson<T>(
-  path: string,
-  init?: RequestInit,
-  timeoutMs = 12_000
-): Promise<T> {
-  const controller = new AbortController()
-  const timer = window.setTimeout(() => controller.abort(), timeoutMs)
+export async function apiJson<T>(path: string, init?: RequestInit): Promise<T> {
   let res: Response
   try {
     res = await fetch(`${API_BASE}${path}`, {
       ...init,
-      signal: init?.signal ?? controller.signal,
       headers: {
         'Content-Type': 'application/json',
         ...(init?.headers || {}),
       },
     })
   } catch (e) {
-    if (e instanceof DOMException && e.name === 'AbortError') {
-      throw new Error(
-        `Request timed out after ${timeoutMs / 1000}s (frontend limit). ` +
-          `The API may still be working — slide generation and exports often need 60–180s; pass a larger timeout to apiJson(). ` +
-          `If the server were unreachable you would usually see a connection error instead.`
-      )
-    }
     throw wrapNetworkError(e)
-  } finally {
-    window.clearTimeout(timer)
   }
   if (!res.ok) {
     const text = await res.text()
@@ -174,6 +158,90 @@ export async function* apiStream<T>(
   }
 }
 
+/** Server-sent events from ``POST /evaluation/grade/batch/stream`` (progress + final result). */
+export type EvaluationBatchGradeProgress = {
+  completed: number
+  total: number
+  current_title: string
+  elapsed_sec: number
+  estimated_remaining_sec: number | null
+}
+
+export type EvaluationBatchGradeStreamResult = {
+  records?: unknown[]
+  batch_id?: string
+  batch_name?: string
+  stats?: Record<string, unknown>
+}
+
+export async function apiPostEvaluationBatchGradeStream(
+  body: object,
+  onProgress: (p: EvaluationBatchGradeProgress) => void,
+): Promise<EvaluationBatchGradeStreamResult> {
+  let res: Response
+  try {
+    res = await fetch(`${API_BASE}/evaluation/grade/batch/stream`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    })
+  } catch (e) {
+    throw wrapNetworkError(e)
+  }
+  if (!res.ok) {
+    const text = await res.text()
+    throw new Error(parseHttpErrorBody(text, res.status, res.statusText))
+  }
+  const reader = res.body!.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ''
+  let finalPayload: EvaluationBatchGradeStreamResult | null = null
+
+  while (true) {
+    const { done, value } = await reader.read()
+    if (done) break
+    buffer += decoder.decode(value, { stream: true })
+    const lines = buffer.split('\n')
+    buffer = lines.pop() ?? ''
+    for (const line of lines) {
+      if (!line.startsWith('data: ')) continue
+      let data: Record<string, unknown>
+      try {
+        data = JSON.parse(line.slice(6)) as Record<string, unknown>
+      } catch {
+        continue
+      }
+      const ev = data.event
+      if (ev === 'progress') {
+        onProgress({
+          completed: Number(data.completed) || 0,
+          total: Number(data.total) || 0,
+          current_title: String(data.current_title ?? ''),
+          elapsed_sec: Number(data.elapsed_sec) || 0,
+          estimated_remaining_sec:
+            data.estimated_remaining_sec === null || data.estimated_remaining_sec === undefined
+              ? null
+              : Number(data.estimated_remaining_sec),
+        })
+      } else if (ev === 'complete') {
+        const r = data.result
+        finalPayload =
+          r && typeof r === 'object' && !Array.isArray(r)
+            ? (r as EvaluationBatchGradeStreamResult)
+            : { records: [] }
+      } else if (ev === 'error') {
+        const detail = typeof data.detail === 'string' ? data.detail : JSON.stringify(data.detail ?? 'Error')
+        throw new Error(detail)
+      }
+    }
+  }
+
+  if (!finalPayload) {
+    throw new Error('Batch grading stream ended without a result.')
+  }
+  return finalPayload
+}
+
 export async function apiDownload(
   path: string,
   init?: RequestInit
@@ -198,32 +266,16 @@ export async function apiDownload(
 }
 
 /** POST JSON, return binary (e.g. PPTX / Moodle XML). Parses filename from Content-Disposition when present. */
-export async function apiPostBlob(
-  path: string,
-  body: object,
-  /** Omit for no client-side abort (legacy). Set for long jobs (e.g. Playwright PPTX). */
-  timeoutMs?: number
-): Promise<{ blob: Blob; filename: string }> {
-  const controller = timeoutMs != null ? new AbortController() : null
-  const timer =
-    timeoutMs != null ? window.setTimeout(() => controller!.abort(), timeoutMs) : undefined
+export async function apiPostBlob(path: string, body: object): Promise<{ blob: Blob; filename: string }> {
   let res: Response
   try {
     res = await fetch(`${API_BASE}${path}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
-      signal: controller?.signal,
     })
   } catch (e) {
-    if (timeoutMs != null && e instanceof DOMException && e.name === 'AbortError') {
-      throw new Error(
-        `Request timed out after ${timeoutMs / 1000}s (frontend limit). Try a larger timeout for apiPostBlob().`
-      )
-    }
     throw wrapNetworkError(e)
-  } finally {
-    if (timer !== undefined) window.clearTimeout(timer)
   }
   if (!res.ok) {
     const text = await res.text()

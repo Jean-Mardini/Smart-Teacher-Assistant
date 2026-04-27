@@ -64,3 +64,7 @@ class DocumentUploadResult(BaseModel):
     filename: str
     stored_path: str
     filetype: str
+    reused_existing: bool = Field(
+        default=False,
+        description="True when bytes matched an existing library file (SHA-256); no duplicate was written.",
+    )

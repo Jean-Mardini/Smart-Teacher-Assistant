@@ -393,7 +393,9 @@ summary_tab, slides_tab, quiz_tab, chat_tab = st.tabs(
 with summary_tab:
     st.subheader("Document Summary")
     summary_length = st.selectbox("Summary length", ["short", "medium", "long"], index=1)
-    st.caption("You can summarize up to 10 documents, 250 pages, or 250,000 extracted characters per request.")
+    st.caption(
+        "Up to 10 documents per run; large decks use parallel chunking and optional RAG (see backend .env.example)."
+    )
 
     if st.button("Generate Summary", type="primary", key="summary_button"):
         with st.spinner("Generating summary..."):

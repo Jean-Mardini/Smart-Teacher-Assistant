@@ -11,11 +11,12 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import re
 import time
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 try:
     from openai import APIError, RateLimitError
@@ -142,11 +143,15 @@ def max_slide_source_chars() -> int:
     Free / on-demand Groq tiers enforce a low **tokens-per-minute** budget; long
     documents plus the slide system prompt exceed that quickly. Override with
     ``GROQ_SLIDE_SOURCE_MAX_CHARS`` (e.g. 12000 on paid tiers).
+
+    When ``SLIDE_GENERATION_FAST`` is on (default), the default cap is slightly higher
+    (9000) because shorter speaker-note targets keep total tokens down.
     """
     raw = (os.getenv("GROQ_SLIDE_SOURCE_MAX_CHARS") or "").strip()
     if raw.isdigit():
         return max(1500, min(int(raw), 200_000))
-    return 5000
+    fast = (os.getenv("SLIDE_GENERATION_FAST") or "1").strip().lower() not in ("0", "false", "no", "off")
+    return 9000 if fast else 5000
 
 
 def truncate_text_for_slide_prompt(text: str) -> tuple[str, bool]:
@@ -199,7 +204,30 @@ _RETRY_AFTER_HINT = re.compile(r"try again in ([\d.]+)\s*s", re.IGNORECASE)
 
 
 def _groq_rate_limit_delay_seconds(exc: Exception) -> float | None:
-    """Parse suggested wait from Groq / OpenAI error (headers or message body)."""
+    """Parse suggested wait from Groq / OpenAI error (JSON body, headers, or string).
+
+    Groq TPM 429s embed ``Please try again in N.Ns`` inside ``body['error']['message']``;
+    the OpenAI client's ``str(exc)`` often omits that text, so we must read ``.body``.
+    """
+    body = getattr(exc, "body", None)
+    if isinstance(body, (bytes, bytearray)):
+        try:
+            body = json.loads(body.decode("utf-8", errors="replace"))
+        except Exception:
+            body = None
+    if isinstance(body, str):
+        try:
+            body = json.loads(body)
+        except Exception:
+            body = None
+    if isinstance(body, dict):
+        err = body.get("error")
+        if isinstance(err, dict):
+            msg = str(err.get("message") or "")
+            m = _RETRY_AFTER_HINT.search(msg)
+            if m:
+                return float(m.group(1))
+
     resp = getattr(exc, "response", None)
     if resp is not None:
         headers = getattr(resp, "headers", None) or {}
@@ -216,26 +244,21 @@ def _groq_rate_limit_delay_seconds(exc: Exception) -> float | None:
     return None
 
 
-def _chat(system: str, user: str, temperature: float = 0.2) -> str:
-    """Chat completion with retries on Groq TPM / rate limits (common on on_demand tier)."""
-    max_attempts = max(1, min(int(os.getenv("GROQ_RATE_LIMIT_RETRIES", "12")), 40))
+def _completion_create_with_retry(**create_kwargs: Any) -> Any:
+    """``chat.completions.create`` with retries on Groq 429 / TPM (on_demand tier).
+
+    Used by plain chat (:func:`_chat`) and JSON-object completions (grading, quiz).
+    Tune with ``GROQ_RATE_LIMIT_RETRIES``, ``GROQ_RATE_LIMIT_MAX_WAIT_SEC``,
+    ``GROQ_RATE_LIMIT_FALLBACK_SEC``.
+    """
+    max_attempts = max(1, min(int(os.getenv("GROQ_RATE_LIMIT_RETRIES", "20")), 50))
     max_sleep = float(os.getenv("GROQ_RATE_LIMIT_MAX_WAIT_SEC", "120"))
     fallback = float(os.getenv("GROQ_RATE_LIMIT_FALLBACK_SEC", "2.5"))
 
     for attempt in range(max_attempts):
         try:
             client = _get_client()
-            response = client.chat.completions.create(
-                model=_get_model(),
-                temperature=temperature,
-                messages=[
-                    {"role": "system", "content": system},
-                    {"role": "user", "content": user},
-                ],
-            )
-            if not response.choices:
-                raise ValueError("Empty response from Groq API.")
-            return response.choices[0].message.content or ""
+            return client.chat.completions.create(**create_kwargs)
         except RateLimitError as exc:
             if attempt >= max_attempts - 1:
                 raise
@@ -245,7 +268,7 @@ def _chat(system: str, user: str, temperature: float = 0.2) -> str:
             else:
                 delay = min(max_sleep, max(1.0, delay))
             logger.warning(
-                "Groq rate limit on chat completion (%s/%s); sleeping %.1fs then retrying.",
+                "Groq rate limit on completion (%s/%s); sleeping %.1fs then retrying.",
                 attempt + 1,
                 max_attempts,
                 delay,
@@ -262,14 +285,29 @@ def _chat(system: str, user: str, temperature: float = 0.2) -> str:
             else:
                 delay = min(max_sleep, max(1.0, delay))
             logger.warning(
-                "Groq HTTP 429 on chat completion (%s/%s); sleeping %.1fs then retrying.",
+                "Groq HTTP 429 on completion (%s/%s); sleeping %.1fs then retrying.",
                 attempt + 1,
                 max_attempts,
                 delay,
             )
             time.sleep(delay)
 
-    raise RuntimeError("_chat exhausted retries without returning")  # pragma: no cover
+    raise RuntimeError("_completion_create_with_retry exhausted retries")  # pragma: no cover
+
+
+def _chat(system: str, user: str, temperature: float = 0.2) -> str:
+    """Chat completion with retries on Groq TPM / rate limits (common on on_demand tier)."""
+    response = _completion_create_with_retry(
+        model=_get_model(),
+        temperature=temperature,
+        messages=[
+            {"role": "system", "content": system},
+            {"role": "user", "content": user},
+        ],
+    )
+    if not response.choices:
+        raise ValueError("Empty response from Groq API.")
+    return response.choices[0].message.content or ""
 
 
 def call_llm_json(system: str, user: str, temperature: float = 0.2) -> dict:
@@ -286,8 +324,7 @@ def call_llm_json(system: str, user: str, temperature: float = 0.2) -> dict:
 
 def call_llm_json_object(system: str, user: str, temperature: float = 0.25) -> dict:
     """Chat completion with ``response_format=json_object`` — reliable dict root for quiz-style tasks."""
-    client = _get_client()
-    response = client.chat.completions.create(
+    response = _completion_create_with_retry(
         model=_get_model(),
         response_format={"type": "json_object"},
         temperature=temperature,
@@ -312,6 +349,46 @@ def call_llm_json_object(system: str, user: str, temperature: float = 0.25) -> d
             return {}
 
 
+def _sanitize_llm_json_payload(obj: Any) -> Any:
+    """Make nested structures safe for ``json.dumps`` (finite floats, JSON-native types)."""
+    if obj is None or isinstance(obj, (str, bool)):
+        return obj
+    if isinstance(obj, float):
+        return obj if math.isfinite(obj) else None
+    if isinstance(obj, int):
+        return obj
+    if isinstance(obj, dict):
+        return {str(k): _sanitize_llm_json_payload(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_sanitize_llm_json_payload(v) for v in obj]
+    return str(obj)
+
+
+def _grade_seed() -> int | None:
+    """Optional deterministic seed for grading JSON calls (set ``GROQ_GRADE_SEED=42`` if the provider supports it)."""
+    raw = (os.getenv("GROQ_GRADE_SEED") or "").strip().lower()
+    if raw in ("", "none", "off"):
+        return None
+    try:
+        return int(raw)
+    except ValueError:
+        return None
+
+
+def _grade_max_completion_tokens() -> int | None:
+    """Cap completion length for grading JSON (lowers TPM; unset with 0 to disable)."""
+    raw = (os.getenv("GROQ_GRADE_MAX_COMPLETION_TOKENS") or "2048").strip().lower()
+    if raw in ("0", "", "none", "off"):
+        return None
+    try:
+        v = int(float(raw))
+    except ValueError:
+        v = 2048
+    if v <= 0:
+        return None
+    return max(256, min(v, 8192))
+
+
 def call_llm_json_payload(
     payload: dict,
     model: Optional[str] = None,
@@ -322,9 +399,13 @@ def call_llm_json_payload(
     Uses Groq's ``json_object`` response format for reliable structured output.
     This is the entry-point used by the evaluation / grading pipeline.
     """
-    client = _get_client()
     chosen_model = (model or "").strip() or _get_model()
-    response = client.chat.completions.create(
+    try:
+        user_content = json.dumps(_sanitize_llm_json_payload(payload), ensure_ascii=False)
+    except (TypeError, ValueError) as exc:
+        logger.error("Could not serialize LLM payload for Groq", exc_info=True)
+        raise ValueError(f"Grading payload is not JSON-serializable: {exc}") from exc
+    create_kwargs: dict[str, Any] = dict(
         model=chosen_model,
         response_format={"type": "json_object"},
         temperature=temperature,
@@ -338,11 +419,21 @@ def call_llm_json_payload(
             },
             {
                 "role": "user",
-                "content": json.dumps(payload, ensure_ascii=False),
+                "content": user_content,
             },
         ],
     )
-    content = response.choices[0].message.content or "{}"
+    max_out = _grade_max_completion_tokens()
+    if max_out is not None:
+        # Groq OpenAI-compatible API accepts max_tokens for chat completions.
+        create_kwargs["max_tokens"] = max_out
+    seed = _grade_seed()
+    if seed is not None:
+        create_kwargs["seed"] = seed
+    response = _completion_create_with_retry(**create_kwargs)
+    if not getattr(response, "choices", None):
+        raise ValueError("Empty response from Groq API (no choices).")
+    content = (response.choices[0].message.content or "").strip() or "{}"
     try:
         return json.loads(content)
     except Exception:

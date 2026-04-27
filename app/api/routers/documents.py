@@ -71,8 +71,9 @@ async def upload_documents(files: list[UploadFile] = File(...)):
             results.append(
                 DocumentUploadResult(
                     filename=existing.name,
-                    stored_path=str(existing),
+                    stored_path=str(existing.resolve()),
                     filetype=existing.suffix.lower().lstrip("."),
+                    reused_existing=True,
                 )
             )
             continue
@@ -93,8 +94,9 @@ async def upload_documents(files: list[UploadFile] = File(...)):
         results.append(
             DocumentUploadResult(
                 filename=target_path.name,
-                stored_path=str(target_path),
+                stored_path=str(target_path.resolve()),
                 filetype=suffix.lstrip("."),
+                reused_existing=False,
             )
         )
 

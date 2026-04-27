@@ -5,15 +5,31 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import re
-from typing import Any, AsyncGenerator, Dict, List
+import time
+from collections.abc import Awaitable, Callable
+from typing import Any, AsyncGenerator, Dict, List, Literal
+from xml.etree.ElementTree import ParseError
 
 from fastapi import APIRouter, File, HTTPException, Query, UploadFile
 from fastapi.responses import Response, StreamingResponse
 
+try:
+    from openai import APIError, RateLimitError
+except ImportError:  # pragma: no cover
+
+    class APIError(Exception):
+        """Placeholder when openai is not installed."""
+
+    class RateLimitError(APIError):
+        """Placeholder when openai is not installed."""
+
+
 from app.models.evaluation import (
     BatchGradeRequest,
     BatchGradeResponse,
+    BatchSubmissionInput,
     EvaluationConfigResponse,
     EvaluationConfigUpdateRequest,
     EvaluationPresetSaveRequest,
@@ -21,10 +37,13 @@ from app.models.evaluation import (
     EvaluationStatusResponse,
     ExportBatchRequest,
     ExportSingleRequest,
+    GradeMoodleMcqBatchRequest,
+    GradeMoodleMcqRequest,
     GradeSubmissionRequest,
     GradeSubmissionResponse,
     HistoryListResponse,
     HistoryRecordUpdateRequest,
+    MoodleXmlPayload,
     ParsedUploadListResponse,
     RubricFromTextRequest,
     RubricGenerationResponse,
@@ -32,7 +51,8 @@ from app.models.evaluation import (
     SourceTextResponse,
 )
 from app.services.evaluation import flexible_grader as fg
-from app.services.llm.groq_client import invalidate_config_cache
+from app.services.evaluation import moodle_mcq_xml as moodle_mcq
+from app.services.llm.groq_client import LLMConfigurationError, invalidate_config_cache
 
 logger = logging.getLogger(__name__)
 
@@ -74,6 +94,176 @@ def _plain_response(content: str | bytes, media_type: str, filename: str) -> Res
 
 def _sse(data: dict) -> str:
     return f"data: {json.dumps(data)}\n\n"
+
+
+def _http_exception_message(exc: HTTPException) -> str:
+    d = exc.detail
+    if isinstance(d, str):
+        return d
+    try:
+        return json.dumps(d)
+    except TypeError:
+        return str(d)
+
+
+GradeBatchProgressFn = Callable[[int, int, str, float], Awaitable[None]]
+"""Async callback (completed, total, current_title, elapsed_sec) after each submission in a batch."""
+
+
+async def _grade_batch_execute(
+    body: BatchGradeRequest,
+    *,
+    on_progress: GradeBatchProgressFn | None = None,
+) -> BatchGradeResponse:
+    """Grade many submissions against one rubric (sequential with optional gap)."""
+    if not body.items:
+        raise HTTPException(status_code=400, detail="items must be a non-empty rubric.")
+    if not body.submissions:
+        raise HTTPException(status_code=400, detail="submissions must be provided.")
+    if fg.requires_reference_material(body.items) and not ((body.reference_text or "").strip() or (body.reference_document_ids or [])):
+        raise HTTPException(
+            status_code=400,
+            detail="Please upload, select, or paste reference material before grading because one or more criteria use reference or hybrid grounding.",
+        )
+
+    teacher_key_text = str(
+        (await asyncio.to_thread(_compose_text, body.teacher_key_text, body.teacher_key_document_ids)).get("text", "")
+    ).strip()
+
+    batch_name = str(body.batch_name or "").strip()
+    batch_created_at = fg.now_iso()
+    ref_text = str(body.reference_text or "").strip()
+    ref_ids = body.reference_document_ids or None
+    parallel = _grade_batch_max_parallel()
+    sem = asyncio.Semaphore(parallel)
+    pause_between = _batch_pause_between_submissions()
+
+    composed_pairs: List[tuple[str, str]] = []
+    for sub in body.submissions:
+        title = str(sub.title or "Submission")
+        try:
+            resolved = await asyncio.to_thread(_compose_text, sub.submission_text, sub.submission_document_ids)
+            text = str(resolved.get("text", "")).strip()
+        except Exception:
+            logger.exception("Batch compose failed for '%s'", title)
+            text = ""
+        composed_pairs.append((title, text))
+        if not text:
+            logger.warning("Batch submission '%s': no text resolved after compose", title)
+
+    async def _grade_one(title: str, submission_text: str) -> Dict[str, Any]:
+        if not submission_text:
+            result = await asyncio.to_thread(
+                fg.build_grade_failure_result,
+                submission_text,
+                body.items,
+                "No submission text could be read for this file.",
+            )
+        else:
+            async with sem:
+                try:
+                    result = await asyncio.to_thread(
+                        fg.grade_submission_fast,
+                        submission_text=submission_text,
+                        items=body.items,
+                        teacher_key_text=teacher_key_text,
+                        reference_document_ids=ref_ids,
+                        reference_text=ref_text,
+                        batch_submission=True,
+                    )
+                except Exception as exc:
+                    logger.exception("Batch grade failed for submission '%s'", title)
+                    result = await asyncio.to_thread(
+                        fg.build_grade_failure_result,
+                        submission_text,
+                        body.items,
+                        str(exc),
+                    )
+        try:
+            return fg.build_result_record(
+                title,
+                result,
+                submission_text,
+                history_type="batch_submission",
+                batch_name=batch_name,
+                batch_created_at=batch_created_at,
+            )
+        except Exception as exc:
+            logger.exception("build_result_record failed for '%s'", title)
+            fallback = await asyncio.to_thread(
+                fg.build_grade_failure_result,
+                submission_text,
+                body.items,
+                f"Record build failed: {exc}",
+            )
+            return fg.build_result_record(
+                title,
+                fallback,
+                submission_text,
+                history_type="batch_submission",
+                batch_name=batch_name,
+                batch_created_at=batch_created_at,
+            )
+
+    raw_records: List[Dict[str, Any]] = []
+    t0 = time.monotonic()
+    for index, (title, txt) in enumerate(composed_pairs):
+        if index > 0 and pause_between > 0:
+            await asyncio.sleep(pause_between)
+        rec = await _grade_one(title, txt)
+        raw_records.append(rec)
+        if on_progress is not None:
+            elapsed = time.monotonic() - t0
+            await on_progress(len(raw_records), len(composed_pairs), title, elapsed)
+
+    raw_records.sort(key=lambda item: float(item.get("overall_score", 0)), reverse=True)
+    final_batch_name = batch_name or f"Batch {batch_created_at}"
+    batch_id = fg.history_batch_id(final_batch_name, raw_records) if raw_records else ""
+
+    records: List[Dict[str, Any]] = []
+    for index, record in enumerate(raw_records, start=1):
+        updated = {
+            **record,
+            "batch_id": batch_id,
+            "batch_name": final_batch_name,
+            "batch_size": len(raw_records),
+            "batch_rank": index,
+            "batch_created_at": batch_created_at,
+        }
+        if body.save_history:
+            await asyncio.to_thread(fg.append_history, updated)
+        records.append(updated)
+
+    stats = fg.build_history_stats(records, fg.build_history_batches(records))
+    return BatchGradeResponse(records=records, batch_id=batch_id, batch_name=final_batch_name, stats=stats)
+
+
+def _grade_batch_max_parallel() -> int:
+    """Parallel Groq grading calls per batch (same rubric). Lower if you hit Groq 429 TPM limits."""
+    try:
+        # Default 1 avoids overlapping Groq TPM when several submissions grade at once (on_demand tier).
+        return max(1, min(int((os.getenv("GRADE_BATCH_MAX_PARALLEL") or "1").strip() or "1"), 12))
+    except ValueError:
+        return 1
+
+
+def _batch_pause_between_submissions() -> float:
+    """Seconds to wait between each file in ``/evaluation/grade/batch`` (light TPM spacing; retries still handle 429)."""
+    try:
+        return max(0.0, float((os.getenv("GRADE_BATCH_SUBMISSION_GAP_SEC") or "1").strip() or "1"))
+    except ValueError:
+        return 1.0
+
+
+def _evaluation_upstream_detail(exc: Exception) -> str:
+    """Short, user-facing message from Groq / OpenAI client errors."""
+    body = getattr(exc, "body", None)
+    if isinstance(body, dict):
+        err = body.get("error")
+        if isinstance(err, dict) and err.get("message"):
+            return str(err["message"])[:2000]
+    msg = str(exc).strip() or type(exc).__name__
+    return msg[:2000]
 
 
 # ---------------------------------------------------------------------------
@@ -160,7 +350,12 @@ async def rubric_from_teacher_key(body: RubricFromTextRequest) -> Dict[str, Any]
     text = str(resolved.get("text", "")).strip()
     if not text:
         raise HTTPException(status_code=400, detail="Provide teacher-key text or at least one document.")
-    result = await asyncio.to_thread(fg.generate_items_from_teacher_key, text, body.total_points)
+    result = await asyncio.to_thread(
+        fg.generate_items_from_teacher_key,
+        text,
+        body.total_points,
+        body.default_grounding,
+    )
     return result
 
 
@@ -176,14 +371,19 @@ async def rubric_from_teacher_key(body: RubricFromTextRequest) -> Dict[str, Any]
 
 async def _stream_rubric(
     body: RubricFromTextRequest,
-    generator_fn,
+    mode: Literal["assignment", "teacher"],
 ) -> AsyncGenerator[str, None]:
     try:
         yield _sse({"status": "resolving", "message": "Resolving source documents…"})
         resolved = await asyncio.to_thread(_compose_text, body.text, body.document_ids)
         text = str(resolved.get("text", "")).strip()
         if not text:
-            yield _sse({"error": "Provide assignment text or at least one document."})
+            msg = (
+                "Provide assignment text or at least one document."
+                if mode == "assignment"
+                else "Provide QA / teacher-key text or at least one document."
+            )
+            yield _sse({"error": msg})
             return
 
         char_count = len(text)
@@ -192,7 +392,15 @@ async def _stream_rubric(
             "message": f"Sending {char_count:,} characters to the AI model…",
         })
 
-        result = await asyncio.to_thread(generator_fn, text, body.total_points)
+        if mode == "assignment":
+            result = await asyncio.to_thread(fg.generate_items_from_assignment, text, body.total_points)
+        else:
+            result = await asyncio.to_thread(
+                fg.generate_items_from_teacher_key,
+                text,
+                body.total_points,
+                body.default_grounding,
+            )
         yield _sse({"done": True, **result})
 
     except Exception as exc:
@@ -203,7 +411,7 @@ async def _stream_rubric(
 @router.post("/rubric/from-assignment/stream")
 async def rubric_from_assignment_stream(body: RubricFromTextRequest) -> StreamingResponse:
     return StreamingResponse(
-        _stream_rubric(body, fg.generate_items_from_assignment),
+        _stream_rubric(body, "assignment"),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
@@ -212,15 +420,130 @@ async def rubric_from_assignment_stream(body: RubricFromTextRequest) -> Streamin
 @router.post("/rubric/from-teacher-key/stream")
 async def rubric_from_teacher_key_stream(body: RubricFromTextRequest) -> StreamingResponse:
     return StreamingResponse(
-        _stream_rubric(body, fg.generate_items_from_teacher_key),
+        _stream_rubric(body, "teacher"),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+@router.post("/rubric/from-moodle-xml", response_model=RubricGenerationResponse)
+async def rubric_from_moodle_xml(body: MoodleXmlPayload) -> RubricGenerationResponse:
+    raw = (body.xml or "").strip()
+    if not raw:
+        raise HTTPException(status_code=400, detail="Provide xml (Moodle <quiz> document).")
+    try:
+        items = await asyncio.to_thread(moodle_mcq.rubric_items_from_key_xml, raw)
+    except ParseError as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid XML: {exc}") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    total = sum(int(i.get("points") or 0) for i in items)
+    return RubricGenerationResponse(
+        rubric_title="Moodle MCQ (from XML)",
+        summary=[f"{len(items)} question(s); {total} total points from <defaultgrade>."],
+        items=items,
     )
 
 
 # ---------------------------------------------------------------------------
 # Grading
 # ---------------------------------------------------------------------------
+
+
+@router.post("/grade/moodle-mcq", response_model=GradeSubmissionResponse)
+async def grade_moodle_mcq(body: GradeMoodleMcqRequest) -> GradeSubmissionResponse:
+    key = (body.key_xml or "").strip()
+    student = (body.student_xml or "").strip()
+    if not key or not student:
+        raise HTTPException(
+            status_code=400,
+            detail="Provide key_xml and student_xml (Moodle <quiz> XML for both).",
+        )
+    try:
+        result = await asyncio.to_thread(moodle_mcq.grade_moodle_xml_pair, key, student)
+    except ParseError as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid XML: {exc}") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    record = fg.build_result_record(
+        str(body.result_title or "Moodle MCQ").strip() or "Moodle MCQ",
+        result,
+        student[:16000],
+        history_type="single",
+    )
+    if body.save_history:
+        await asyncio.to_thread(fg.append_history, record)
+
+    return GradeSubmissionResponse(
+        overall_score=float(result.get("overall_score", 0)),
+        overall_out_of=int(result.get("overall_out_of", 0)),
+        items_results=list(result.get("items_results", [])),
+        record=record,
+    )
+
+
+@router.post("/grade/moodle-mcq/batch", response_model=BatchGradeResponse)
+async def grade_moodle_mcq_batch(body: GradeMoodleMcqBatchRequest) -> BatchGradeResponse:
+    key = (body.key_xml or "").strip()
+    if not key:
+        raise HTTPException(status_code=400, detail="Provide key_xml (Moodle <quiz> answer key).")
+    if not body.submissions:
+        raise HTTPException(status_code=400, detail="Provide submissions with title and student_xml.")
+
+    batch_name = str(body.batch_name or "").strip()
+    batch_created_at = fg.now_iso()
+    raw_records: List[Dict[str, Any]] = []
+    for submission in body.submissions:
+        student = str(submission.student_xml or "").strip()
+        title = str(submission.title or "Submission").strip() or "Submission"
+        if not student:
+            logger.warning("Skipping MCQ batch row '%s': empty student_xml", title)
+            continue
+        try:
+            result = await asyncio.to_thread(moodle_mcq.grade_moodle_xml_pair, key, student)
+        except ParseError as exc:
+            raise HTTPException(status_code=400, detail=f"Invalid XML ({title}): {exc}") from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=f"{title}: {exc}") from exc
+        raw_records.append(
+            fg.build_result_record(
+                title,
+                result,
+                student[:16000],
+                history_type="batch_submission",
+                batch_name=batch_name,
+                batch_created_at=batch_created_at,
+            )
+        )
+
+    if not raw_records:
+        raise HTTPException(
+            status_code=400,
+            detail="No valid student_xml in submissions (all empty or could not be graded).",
+        )
+
+    raw_records.sort(key=lambda item: float(item.get("overall_score", 0)), reverse=True)
+    final_batch_name = batch_name or f"Moodle MCQ batch {batch_created_at}"
+    batch_id = fg.history_batch_id(final_batch_name, raw_records) if raw_records else ""
+
+    records: List[Dict[str, Any]] = []
+    for index, record in enumerate(raw_records, start=1):
+        updated = {
+            **record,
+            "batch_id": batch_id,
+            "batch_name": final_batch_name,
+            "batch_size": len(raw_records),
+            "batch_rank": index,
+            "batch_created_at": batch_created_at,
+        }
+        if body.save_history:
+            await asyncio.to_thread(fg.append_history, updated)
+        records.append(updated)
+
+    stats = fg.build_history_stats(records, fg.build_history_batches(records))
+    return BatchGradeResponse(records=records, batch_id=batch_id, batch_name=final_batch_name, stats=stats)
+
 
 @router.post("/grade", response_model=GradeSubmissionResponse)
 async def grade_submission(body: GradeSubmissionRequest) -> GradeSubmissionResponse:
@@ -241,101 +564,178 @@ async def grade_submission(body: GradeSubmissionRequest) -> GradeSubmissionRespo
         (await asyncio.to_thread(_compose_text, body.teacher_key_text, body.teacher_key_document_ids)).get("text", "")
     ).strip()
 
-    result = await asyncio.to_thread(
-        fg.grade_submission_fast,
-        submission_text=submission,
-        items=body.items,
-        teacher_key_text=teacher_key_text,
-        reference_document_ids=body.reference_document_ids or None,
-        reference_text=str(body.reference_text or "").strip(),
-    )
-
-    record = fg.build_result_record(
-        body.result_title,
-        result,
-        submission,
-        history_type="single",
-    )
-    if body.save_history:
-        await asyncio.to_thread(fg.append_history, record)
-
-    return GradeSubmissionResponse(
-        overall_score=float(result.get("overall_score", 0)),
-        overall_out_of=int(result.get("overall_out_of", 0)),
-        items_results=list(result.get("items_results", [])),
-        record=record,
-    )
-
-
-
-@router.post("/grade/batch", response_model=BatchGradeResponse)
-async def grade_batch(body: BatchGradeRequest) -> BatchGradeResponse:
-    if not body.items:
-        raise HTTPException(status_code=400, detail="items must be a non-empty rubric.")
-    if not body.submissions:
-        raise HTTPException(status_code=400, detail="submissions must be provided.")
-    if fg.requires_reference_material(body.items) and not ((body.reference_text or "").strip() or (body.reference_document_ids or [])):
-        raise HTTPException(
-            status_code=400,
-            detail="Please upload, select, or paste reference material before grading because one or more criteria use reference or hybrid grounding.",
-        )
-
-    teacher_key_text = str(
-        (await asyncio.to_thread(_compose_text, body.teacher_key_text, body.teacher_key_document_ids)).get("text", "")
-    ).strip()
-
-    batch_name = str(body.batch_name or "").strip()
-    batch_created_at = fg.now_iso()
-    raw_records: List[Dict[str, Any]] = []
-    skipped = 0
-    for submission in body.submissions:
-        submission_text = str(
-            (await asyncio.to_thread(_compose_text, submission.submission_text, submission.submission_document_ids)).get("text", "")
-        ).strip()
-        if not submission_text:
-            skipped += 1
-            logger.warning("Skipping submission '%s': no text resolved", submission.title)
-            continue
-
+    try:
         result = await asyncio.to_thread(
             fg.grade_submission_fast,
-            submission_text=submission_text,
+            submission_text=submission,
             items=body.items,
             teacher_key_text=teacher_key_text,
             reference_document_ids=body.reference_document_ids or None,
             reference_text=str(body.reference_text or "").strip(),
         )
-        raw_records.append(
-            fg.build_result_record(
-                submission.title,
-                result,
-                submission_text,
-                history_type="batch_submission",
-                batch_name=batch_name,
-                batch_created_at=batch_created_at,
-            )
+
+        record = fg.build_result_record(
+            body.result_title,
+            result,
+            submission,
+            history_type="single",
         )
-
-    raw_records.sort(key=lambda item: float(item.get("overall_score", 0)), reverse=True)
-    final_batch_name = batch_name or f"Batch {batch_created_at}"
-    batch_id = fg.history_batch_id(final_batch_name, raw_records) if raw_records else ""
-
-    records: List[Dict[str, Any]] = []
-    for index, record in enumerate(raw_records, start=1):
-        updated = {
-            **record,
-            "batch_id": batch_id,
-            "batch_name": final_batch_name,
-            "batch_size": len(raw_records),
-            "batch_rank": index,
-            "batch_created_at": batch_created_at,
-        }
         if body.save_history:
-            await asyncio.to_thread(fg.append_history, updated)
-        records.append(updated)
+            await asyncio.to_thread(fg.append_history, record)
 
-    stats = fg.build_history_stats(records, fg.build_history_batches(records))
-    return BatchGradeResponse(records=records, batch_id=batch_id, batch_name=final_batch_name, stats=stats)
+        return GradeSubmissionResponse(
+            overall_score=float(result.get("overall_score", 0)),
+            overall_out_of=int(result.get("overall_out_of", 0)),
+            items_results=list(result.get("items_results", [])),
+            record=record,
+        )
+    except HTTPException:
+        raise
+    except LLMConfigurationError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except RateLimitError as exc:
+        raise HTTPException(
+            status_code=429,
+            detail=_evaluation_upstream_detail(exc) or "Groq rate limit exceeded. Wait a minute and try again.",
+        ) from exc
+    except APIError as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=_evaluation_upstream_detail(exc) or "The language model provider returned an error.",
+        ) from exc
+    except Exception as exc:  # pragma: no cover — show real cause instead of generic 500
+        logger.exception("POST /evaluation/grade failed")
+        raise HTTPException(
+            status_code=500,
+            detail=str(exc) or type(exc).__name__,
+        ) from exc
+
+
+
+@router.post("/grade/batch", response_model=BatchGradeResponse)
+async def grade_batch(body: BatchGradeRequest) -> BatchGradeResponse:
+    try:
+        return await _grade_batch_execute(body)
+    except HTTPException:
+        raise
+    except LLMConfigurationError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except RateLimitError as exc:
+        raise HTTPException(
+            status_code=429,
+            detail=_evaluation_upstream_detail(exc) or "Groq rate limit exceeded. Wait a minute and try again.",
+        ) from exc
+    except APIError as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=_evaluation_upstream_detail(exc) or "The language model provider returned an error.",
+        ) from exc
+    except Exception as exc:  # pragma: no cover
+        logger.exception("POST /evaluation/grade/batch failed")
+        raise HTTPException(
+            status_code=500,
+            detail=str(exc) or type(exc).__name__,
+        ) from exc
+
+
+@router.post("/grade/batch/stream")
+async def grade_batch_stream(body: BatchGradeRequest) -> StreamingResponse:
+    """Same grading as ``/grade/batch``, but emits SSE ``progress`` events then a final ``complete`` or ``error``."""
+
+    async def event_gen() -> AsyncGenerator[str, None]:
+        queue: asyncio.Queue[str | None] = asyncio.Queue()
+
+        async def on_progress(completed: int, total: int, title: str, elapsed_sec: float) -> None:
+            if completed <= 0:
+                est: float | None = None
+            elif completed >= total:
+                est = 0.0
+            else:
+                est = max(0.0, (total - completed) * (elapsed_sec / completed))
+            await queue.put(
+                _sse(
+                    {
+                        "event": "progress",
+                        "completed": completed,
+                        "total": total,
+                        "current_title": title,
+                        "elapsed_sec": round(elapsed_sec, 1),
+                        "estimated_remaining_sec": None if est is None else round(est, 1),
+                    }
+                )
+            )
+
+        async def runner() -> None:
+            try:
+                result = await _grade_batch_execute(body, on_progress=on_progress)
+                await queue.put(_sse({"event": "complete", "result": result.model_dump(mode="json")}))
+            except HTTPException as exc:
+                await queue.put(
+                    _sse(
+                        {
+                            "event": "error",
+                            "detail": _http_exception_message(exc),
+                            "status_code": exc.status_code,
+                        }
+                    )
+                )
+            except LLMConfigurationError as exc:
+                await queue.put(_sse({"event": "error", "detail": str(exc), "status_code": 503}))
+            except RateLimitError as exc:
+                await queue.put(
+                    _sse(
+                        {
+                            "event": "error",
+                            "detail": _evaluation_upstream_detail(exc)
+                            or "Groq rate limit exceeded. Wait a minute and try again.",
+                            "status_code": 429,
+                        }
+                    )
+                )
+            except APIError as exc:
+                await queue.put(
+                    _sse(
+                        {
+                            "event": "error",
+                            "detail": _evaluation_upstream_detail(exc)
+                            or "The language model provider returned an error.",
+                            "status_code": 502,
+                        }
+                    )
+                )
+            except Exception as exc:  # pragma: no cover
+                logger.exception("POST /evaluation/grade/batch/stream failed")
+                await queue.put(
+                    _sse({"event": "error", "detail": str(exc) or type(exc).__name__, "status_code": 500})
+                )
+            finally:
+                await queue.put(None)
+
+        task = asyncio.create_task(runner())
+        try:
+            while True:
+                item = await queue.get()
+                if item is None:
+                    break
+                yield item
+            await task
+        finally:
+            if not task.done():
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+
+    return StreamingResponse(
+        event_gen(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 # ---------------------------------------------------------------------------

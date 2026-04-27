@@ -6,6 +6,7 @@ import asyncio
 import json
 import os
 import re
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
@@ -13,7 +14,10 @@ from app.models.agents import SummaryResult
 from app.services.knowledge.chunking import chunk_text
 from app.services.llm.groq_client import call_llm_json
 
-PROMPT_PATH = Path(__file__).resolve().parents[2] / "prompts" / "summarize.md"
+_PROMPTS_DIR = Path(__file__).resolve().parents[2] / "prompts"
+PROMPT_PATH = _PROMPTS_DIR / "summarize.md"
+PROMPT_MAP_CHUNK_PATH = _PROMPTS_DIR / "summarize_map_chunk.md"
+PROMPT_REDUCE_PATH = _PROMPTS_DIR / "summarize_reduce.md"
 
 LATEX_OCR_DESC_PREFIX = "LaTeX (OCR):"
 
@@ -27,14 +31,14 @@ MAX_SUMMARY_DOCUMENTS = 10
 # Large slide decks exceed the old defaults quickly; override via env if needed.
 MAX_SUMMARY_PAGES = int(os.getenv("MAX_SUMMARY_PAGES", "400"))
 MAX_SUMMARY_CHARS = int(os.getenv("MAX_SUMMARY_CHARS", "600000"))
-# Chunk size: Groq on_demand tiers often cap a single request around ~6k input tokens
-# (prompt + document). ~10k chars plus our summarize prompt stays safer; raise on paid tiers.
-SUMMARY_CHUNK_SIZE = int(os.getenv("SUMMARY_CHUNK_SIZE", "10000"))
-SUMMARY_CHUNK_OVERLAP = int(os.getenv("SUMMARY_CHUNK_OVERLAP", "600"))
-REDUCTION_CHUNK_SIZE = int(os.getenv("REDUCTION_CHUNK_SIZE", "12000"))
-REDUCTION_CHUNK_OVERLAP = int(os.getenv("REDUCTION_CHUNK_OVERLAP", "600"))
-# Parallel calls multiply tokens in the same wall-clock minute (Groq on_demand TPM).
-SUMMARY_MAX_PARALLEL = max(1, min(int(os.getenv("SUMMARY_MAX_PARALLEL", "1")), 12))
+# Chunk size: larger chunks mean fewer LLM round-trips (faster). Tune down if Groq returns
+# context errors; Groq 128k models usually tolerate ~20–26k chars + prompt for map passes.
+SUMMARY_CHUNK_SIZE = int(os.getenv("SUMMARY_CHUNK_SIZE", "22000"))
+SUMMARY_CHUNK_OVERLAP = int(os.getenv("SUMMARY_CHUNK_OVERLAP", "900"))
+REDUCTION_CHUNK_SIZE = int(os.getenv("REDUCTION_CHUNK_SIZE", "26000"))
+REDUCTION_CHUNK_OVERLAP = int(os.getenv("REDUCTION_CHUNK_OVERLAP", "900"))
+# Parallel map/reduce calls (huge win vs 1). Set SUMMARY_MAX_PARALLEL=2–3 if you hit Groq TPM 429s.
+SUMMARY_MAX_PARALLEL = max(1, min(int(os.getenv("SUMMARY_MAX_PARALLEL", "6")), 12))
 
 # Bracket-style numeric citations only (e.g. [1], [12]); post-process never touches formulas list.
 _BRACKET_NUM_REF = re.compile(r"\[(\d+)\]")
@@ -172,18 +176,64 @@ def _apply_reference_marker_postprocess(
     return out, extras
 
 
-def _should_use_rag_summarize(use_rag: bool | None, num_docs: int, combined_len: int) -> bool:
+def _should_use_rag_summarize(
+    use_rag: bool | None,
+    num_docs: int,
+    combined_len: int,
+    total_pages: int = 0,
+) -> bool:
     if use_rag is True:
         return True
     if use_rag is False:
         return False
-    thr_single = int(os.getenv("SUMMARY_RAG_CHAR_THRESHOLD", "100000"))
+    thr_single = int(os.getenv("SUMMARY_RAG_CHAR_THRESHOLD", "55000"))
     thr_multi = int(os.getenv("SUMMARY_RAG_MULTI_DOC_CHAR_THRESHOLD", "50000"))
+    force_pages = max(0, int(os.getenv("SUMMARY_RAG_FORCE_PAGES", "70")))
+    if num_docs == 1 and force_pages > 0 and total_pages >= force_pages:
+        return True
     if num_docs > 1 and combined_len > thr_multi:
         return True
     if combined_len > thr_single:
         return True
     return False
+
+
+def _soft_cap_text(text: str, max_chars: int) -> tuple[str, bool]:
+    """Trim at a paragraph boundary when possible; append a short notice if truncated."""
+    t = (text or "").strip()
+    if not t or len(t) <= max_chars:
+        return t, False
+    cut = t[:max_chars].rstrip()
+    br = max(cut.rfind("\n\n"), cut.rfind(". "), int(max_chars * 0.82))
+    if br > max_chars // 3:
+        cut = cut[:br].rstrip()
+    note = (
+        "\n\n[… Context truncated for a faster summary; all statements should still follow this text only.]"
+    )
+    return cut + note, True
+
+
+def _stratified_excerpt(text: str, max_chars: int) -> str:
+    """Head + mid + tail slices when the full document is too large for one model pass."""
+    t = (text or "").strip()
+    if len(t) <= max_chars:
+        return t
+    # Reserve space for markers
+    budget = max_chars - 280
+    a = budget * 50 // 100
+    b = budget * 25 // 100
+    c = budget - a - b
+    head = t[:a].rstrip()
+    mid_start = max((len(t) - b) // 2, 0)
+    mid = t[mid_start : mid_start + b].strip()
+    tail = t[-max(c, 0) :].strip()
+    return (
+        f"[BEGIN — {len(t)} characters total]\n{head}\n\n"
+        f"[MIDDLE excerpt]\n{mid}\n\n"
+        f"[END excerpt]\n{tail}\n\n"
+        "[Note: Vector retrieval returned little text; this stratified excerpt replaces the full "
+        "document for one fast summarization pass.]"
+    )
 
 
 def _retrieve_summary_context_sync(documents: list[dict[str, Any]], combined_excerpt: str) -> str:
@@ -198,7 +248,9 @@ def _retrieve_summary_context_sync(documents: list[dict[str, Any]], combined_exc
         f"Document titles: {'; '.join(titles)}\n\n"
         f"Representative excerpt:\n{excerpt}"
     )
-    top_k = max(4, min(int(os.getenv("SUMMARY_RAG_TOP_K", "32")), 80))
+    top_k = max(4, min(int(os.getenv("SUMMARY_RAG_TOP_K", "28")), 80))
+    per_chunk = max(300, min(int(os.getenv("SUMMARY_RAG_CHUNK_CHARS", "1400")), 8000))
+    rag_cap = max(8000, min(int(os.getenv("SUMMARY_RAG_INPUT_CAP", "38000")), 200_000))
     from app.services.knowledge.retrieval import Retriever
 
     retriever = Retriever()
@@ -212,8 +264,13 @@ def _retrieve_summary_context_sync(documents: list[dict[str, Any]], combined_exc
         if sh:
             head += f" — {sh}"
         head += "\n"
-        parts.append(head + (getattr(c, "chunk_text", None) or "").strip())
-    return "\n\n".join(parts).strip()
+        body = (getattr(c, "chunk_text", None) or "").strip()
+        if len(body) > per_chunk:
+            body = body[:per_chunk].rstrip() + "\n[…]"
+        parts.append(head + body)
+    joined = "\n\n".join(parts).strip()
+    capped, _ = _soft_cap_text(joined, rag_cap)
+    return capped
 
 
 def _format_table(table: dict[str, Any]) -> str:
@@ -355,6 +412,42 @@ def _summary_length_instruction(length: str) -> str:
     return length_map.get(length, "maximum 150 words")
 
 
+@lru_cache(maxsize=1)
+def _summarize_prompt_templates() -> tuple[str, str, str]:
+    """Full (final), map-chunk, and reduce-phase prompts (cached)."""
+    return (
+        PROMPT_PATH.read_text(encoding="utf-8"),
+        PROMPT_MAP_CHUNK_PATH.read_text(encoding="utf-8"),
+        PROMPT_REDUCE_PATH.read_text(encoding="utf-8"),
+    )
+
+
+def _call_map_chunk_prompt(prompt: str, title: str, text: str) -> dict[str, Any]:
+    """Lighter prompt for hierarchical map phase (one raw-text chunk)."""
+    system = "You output strict JSON only."
+    user = f"{prompt}\n\nTITLE:\n{title}\n\nEXCERPT:\n{text}"
+    data = call_llm_json(system, user)
+    data.setdefault("action_items", [])
+    data.setdefault("formulas", [])
+    data.setdefault("glossary", [])
+    data.setdefault("key_points", [])
+    data.setdefault("summary", "")
+    return data
+
+
+def _call_reduce_prompt(prompt: str, title: str, text: str) -> dict[str, Any]:
+    """Lighter prompt for merging serialized partial JSON summaries."""
+    system = "You output strict JSON only."
+    user = f"{prompt}\n\nTITLE:\n{title}\n\nPARTIAL SUMMARIES:\n{text}"
+    data = call_llm_json(system, user)
+    data.setdefault("action_items", [])
+    data.setdefault("formulas", [])
+    data.setdefault("glossary", [])
+    data.setdefault("key_points", [])
+    data.setdefault("summary", "")
+    return data
+
+
 def _call_summary_prompt(prompt: str, title: str, text: str) -> dict[str, Any]:
     reference_note = (
         "If the document includes inline references like [1], [2], or [3], "
@@ -385,10 +478,8 @@ TEXT:
 
 
 def _serialize_partial(index: int, partial: dict[str, Any]) -> str:
-    return (
-        f"PARTIAL SUMMARY {index}\n"
-        f"{json.dumps(partial, ensure_ascii=False, indent=2)}"
-    )
+    # Compact JSON keeps the reduce / final phases smaller and faster.
+    return f"PARTIAL SUMMARY {index}\n{json.dumps(partial, ensure_ascii=False, separators=(',', ':'))}"
 
 
 def _collect_processing_notes(
@@ -399,6 +490,7 @@ def _collect_processing_notes(
     *,
     input_char_count: int | None = None,
     rag_used: bool = False,
+    excerpt_fallback: bool = False,
 ) -> list[str]:
     notes: list[str] = []
     section_count = sum(len(doc.get("sections", [])) for doc in documents)
@@ -406,10 +498,16 @@ def _collect_processing_notes(
     image_count = sum(len(doc.get("images", [])) for doc in documents)
     approx_chars = input_char_count if input_char_count is not None else len(combined_text)
 
-    if rag_used:
+    if excerpt_fallback:
+        notes.append(
+            "Vector retrieval returned little text versus document size; used a stratified excerpt "
+            "(beginning, middle, end) of the full extraction for one fast pass instead of many chunk calls."
+        )
+    elif rag_used:
         notes.append(
             "Built summarization input from vector retrieval (RAG) over the selected document id(s); "
-            "bracket citations [n] are still validated against the full extracted text."
+            "retrieved passages were capped for speed. Bracket citations [n] are still validated against "
+            "the full extracted text."
         )
     if len(documents) > 1:
         notes.append(f"Combined {len(documents)} documents into one summary request.")
@@ -447,7 +545,9 @@ def _validate_limits(documents: list[dict[str, Any]], total_pages: int, combined
 
 
 async def _synthesize_long_input(
-    prompt: str,
+    prompt_full: str,
+    prompt_map: str,
+    prompt_reduce: str,
     title: str,
     combined_text: str,
 ) -> tuple[dict[str, Any], int]:
@@ -462,7 +562,7 @@ async def _synthesize_long_input(
     async def _partial(index: int, piece: str) -> dict[str, Any]:
         partial_title = f"{title} - chunk {index}/{len(base_chunks)}"
         async with sem:
-            return await asyncio.to_thread(_call_summary_prompt, prompt, partial_title, piece)
+            return await asyncio.to_thread(_call_map_chunk_prompt, prompt_map, partial_title, piece)
 
     partial_summaries = await asyncio.gather(
         *[_partial(i, p) for i, p in enumerate(base_chunks, start=1)]
@@ -482,7 +582,7 @@ async def _synthesize_long_input(
     if len(reduction_chunks) == 1:
         final_data = await asyncio.to_thread(
             _call_summary_prompt,
-            prompt,
+            prompt_full,
             f"{title} - final synthesis",
             reduction_chunks[0],
         )
@@ -491,7 +591,7 @@ async def _synthesize_long_input(
     async def _reduction(index: int, piece: str) -> dict[str, Any]:
         reduction_title = f"{title} - reduction {index}/{len(reduction_chunks)}"
         async with sem:
-            return await asyncio.to_thread(_call_summary_prompt, prompt, reduction_title, piece)
+            return await asyncio.to_thread(_call_reduce_prompt, prompt_reduce, reduction_title, piece)
 
     reduction_partials = await asyncio.gather(
         *[_reduction(i, p) for i, p in enumerate(reduction_chunks, start=1)]
@@ -503,7 +603,7 @@ async def _synthesize_long_input(
     )
     final_data = await asyncio.to_thread(
         _call_summary_prompt,
-        prompt,
+        prompt_full,
         f"{title} - final synthesis",
         final_serialized,
     )
@@ -515,8 +615,8 @@ async def run_summarizer(
     length: str = "medium",
     use_rag: bool | None = None,
 ) -> SummaryResult:
-    prompt = PROMPT_PATH.read_text(encoding="utf-8")
-    prompt = prompt.replace("{SUMMARY_LENGTH}", _summary_length_instruction(length))
+    prompt_full_tpl, prompt_map_tpl, prompt_reduce_tpl = _summarize_prompt_templates()
+    prompt = prompt_full_tpl.replace("{SUMMARY_LENGTH}", _summary_length_instruction(length))
 
     documents = _normalize_documents(doc_json)
     image_notes: list[str] = []
@@ -538,12 +638,19 @@ async def run_summarizer(
         )
 
     rag_used = False
+    excerpt_fallback = False
     synthesis_input = combined_text
-    if _should_use_rag_summarize(use_rag, len(documents), len(combined_text)):
+    if _should_use_rag_summarize(use_rag, len(documents), len(combined_text), total_pages):
         rag_text = await asyncio.to_thread(_retrieve_summary_context_sync, documents, combined_text)
         if len(rag_text.strip()) > 400:
             synthesis_input = rag_text
             rag_used = True
+        else:
+            fb_min = max(50_000, int(os.getenv("SUMMARY_FALLBACK_MIN_CHARS", "90000")))
+            fb_chars = max(12_000, min(int(os.getenv("SUMMARY_FALLBACK_EXCERPT_CHARS", "52000")), 120_000))
+            if len(combined_text) > fb_min:
+                synthesis_input = _stratified_excerpt(combined_text, fb_chars)
+                excerpt_fallback = True
 
     _validate_limits(documents, total_pages, synthesis_input)
 
@@ -558,7 +665,13 @@ async def run_summarizer(
         data = await asyncio.to_thread(_call_summary_prompt, prompt, title, synthesis_input)
         chunk_count = 1
     else:
-        data, chunk_count = await _synthesize_long_input(prompt, title, synthesis_input)
+        data, chunk_count = await _synthesize_long_input(
+            prompt,
+            prompt_map_tpl,
+            prompt_reduce_tpl,
+            title,
+            synthesis_input,
+        )
 
     processing_notes = _collect_processing_notes(
         documents,
@@ -567,6 +680,7 @@ async def run_summarizer(
         image_notes,
         input_char_count=len(synthesis_input),
         rag_used=rag_used,
+        excerpt_fallback=excerpt_fallback,
     )
 
     data.setdefault("action_items", [])

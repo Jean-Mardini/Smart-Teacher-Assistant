@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import os
 import re
 from pathlib import Path
 from typing import Any
@@ -49,6 +51,58 @@ SLIDE_TEMPLATE_INSTRUCTIONS: dict[str, str] = {
         "speaker_notes **110–200 words**: narrative detail and **examples** grounded in the document only."
     ),
 }
+
+# Shorter template blocks when SLIDE_GENERATION_FAST=1 (default) — fewer output tokens → faster Groq.
+SLIDE_TEMPLATE_FAST: dict[str, str] = {
+    "academic_default": (
+        "Teaching deck: **slide_title** 4–8 words; **subtitle** 10–18 words (scope, not a repeat of the title). "
+        "**bullets** 3–4 lines, **10–18 words** each, **Keyword** — explanation from the source only (bold the keyword). "
+        "**speaker_notes** 70–110 words: mirror bullets, **one** concrete example when the text allows, short transition. "
+        "**image_refs** for the best on-document figure per slide when it fits."
+    ),
+    "minimal_clean": (
+        "Minimal deck: subtitle every slide; **3–4** bullets **10–18 words**; speaker notes **70–100 words** with one source-grounded example when possible."
+    ),
+    "workshop_interactive": (
+        "Workshop: learner-facing bullets **10–20 words**; speaker notes **80–120 words** with one document-based activity or example."
+    ),
+    "executive_summary": (
+        "Executive: outcome titles; **3–4** bullets **10–20 words**; speaker notes **70–110 words** with implications + one source example when available."
+    ),
+    "deep_technical": (
+        "Technical: precise terms; **3–4** bullets **10–22 words**; speaker notes **80–120 words** with definitions and one concrete case from the text."
+    ),
+    "story_visual": (
+        "Story deck: one beat per slide; **3–4** bullets **10–20 words**; speaker notes **75–115 words** with one grounded example and a transition."
+    ),
+}
+
+
+def _slide_llm_fast() -> bool:
+    """When on (default), use shorter template + prompt targets so Groq returns fewer tokens."""
+    v = (os.getenv("SLIDE_GENERATION_FAST") or "1").strip().lower()
+    return v not in ("0", "false", "no", "off")
+
+
+def _tighten_slides_system_prompt(text: str) -> str:
+    """Reduce mandated speaker-note length in slides.md (main latency driver)."""
+    if not _slide_llm_fast():
+        return text
+    block_old = (
+        "- **speaker_notes**: **130–240 words** — this is where most **detail** lives: **explain** each bullet, add **why it matters**, and include **examples**.\n"
+        "  - **Examples are required when the document contains any** (case studies, scenarios, numbers, comparisons, quotes, figure takeaways): **quote or paraphrase them here** and tie them to the bullets.\n"
+        "  - If the document truly has **no** illustrative material for a slide, say so briefly and deepen with **step-by-step oral reasoning** grounded only in the text (still no invented facts).\n"
+        "  - Aim for **at least two distinct illustrative beats** per slide when the source supports it (e.g. one scenario + one implication), otherwise **one** solid example minimum.\n"
+        "  - End with a **transition** cue to the next slide. No filler."
+    )
+    block_new = (
+        "- **speaker_notes**: **70–120 words** — one paragraph: touch each bullet briefly, **one** concrete document example when the source has any, short **why it matters**, end with one **transition** phrase. No invented facts."
+    )
+    if block_old in text:
+        text = text.replace(block_old, block_new)
+    text = text.replace("**about 12–28 words**", "**about 10–20 words**")
+    text = text.replace("**about 12–26 words**", "**about 10–20 words**")
+    return text
 
 
 def _format_image(img: dict[str, Any], image_notes: list[str]) -> str:
@@ -321,8 +375,12 @@ async def run_slides(
 ) -> SlideDeckResult:
     prompt = PROMPT_PATH.read_text(encoding="utf-8")
     prompt = prompt.replace("{N_SLIDES}", str(n_slides))
-    tmpl = SLIDE_TEMPLATE_INSTRUCTIONS.get(template) or SLIDE_TEMPLATE_INSTRUCTIONS["academic_default"]
+    if _slide_llm_fast():
+        tmpl = SLIDE_TEMPLATE_FAST.get(template) or SLIDE_TEMPLATE_FAST["academic_default"]
+    else:
+        tmpl = SLIDE_TEMPLATE_INSTRUCTIONS.get(template) or SLIDE_TEMPLATE_INSTRUCTIONS["academic_default"]
     prompt = prompt.replace("{TEMPLATE_INSTRUCTIONS}", tmpl)
+    prompt = _tighten_slides_system_prompt(prompt)
 
     title = doc_json.get("title", "Document")
     image_notes: list[str] = []
@@ -358,7 +416,7 @@ TEXT:
 {full_text}
 """
 
-    raw = call_llm_json(system, user)
+    raw = await asyncio.to_thread(call_llm_json, system, user)
 
     if not raw:
         return SlideDeckResult(

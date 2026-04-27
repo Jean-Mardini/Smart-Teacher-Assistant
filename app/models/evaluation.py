@@ -6,7 +6,7 @@ API request/response shapes for Kristy's Flexible Grader live here; service logi
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 from pydantic import BaseModel, Field
 
@@ -54,6 +54,41 @@ class RubricFromTextRequest(BaseModel):
     text: str = Field("", description="Assignment text or teacher key text.")
     document_ids: List[str] = Field(default_factory=list)
     total_points: int = Field(100, ge=1, le=2000)
+    default_grounding: Optional[Literal["ai", "reference", "hybrid"]] = Field(
+        default=None,
+        description="For QA / teacher-key rubrics: force this grounding on every conceptual item.",
+    )
+
+
+class MoodleXmlPayload(BaseModel):
+    """Parse a Moodle ``<quiz>`` XML answer key into rubric-style items (exact mode)."""
+
+    xml: str = Field("", description="Moodle <quiz> XML string.")
+
+
+class GradeMoodleMcqRequest(BaseModel):
+    """Deterministic MCQ grading: two Moodle XML documents with matching question names."""
+
+    key_xml: str = ""
+    student_xml: str = ""
+    result_title: str = "Moodle MCQ"
+    save_history: bool = True
+
+
+class MoodleMcqStudentSubmission(BaseModel):
+    """One learner Moodle ``<quiz>`` XML in an MCQ batch."""
+
+    title: str = "Submission"
+    student_xml: str = ""
+
+
+class GradeMoodleMcqBatchRequest(BaseModel):
+    """One answer key; multiple student Moodle XML attempts (same shape as text batch results)."""
+
+    key_xml: str = ""
+    submissions: List[MoodleMcqStudentSubmission] = Field(default_factory=list)
+    batch_name: str = ""
+    save_history: bool = True
 
 
 class RubricGenerationResponse(BaseModel):

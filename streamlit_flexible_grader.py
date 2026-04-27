@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import json
+import os
+import time
 from datetime import datetime
 from typing import Any, Dict, List, Tuple
 
@@ -24,6 +26,7 @@ export_single_report = fg.export_single_report
 extract_text = fg.extract_text
 generate_items_from_assignment = fg.generate_items_from_assignment
 generate_items_from_teacher_key = fg.generate_items_from_teacher_key
+build_grade_failure_result = fg.build_grade_failure_result
 grade_submission_fast = fg.grade_submission_fast
 load_config = fg.load_config
 load_history = fg.load_history
@@ -861,7 +864,7 @@ def page_grade(total_points: int, save_history: bool) -> None:
             )
     end_card()
 
-    start_card("Batch submissions", "Still fast because each submission uses one grading call.")
+    start_card("Batch submissions", "Files are graded one at a time with pauses to avoid Groq rate limits.")
     batch_files = st.file_uploader(
         "Upload multiple submissions",
         type=UPLOAD_TYPES,
@@ -878,23 +881,38 @@ def page_grade(total_points: int, save_history: bool) -> None:
             if not subs:
                 st.error("Please upload multiple files or a ZIP.")
             else:
-                records = []
+                records: List[Dict[str, Any]] = []
                 prog = st.progress(0.0)
                 status = st.empty()
+                tk = st.session_state.teacher_key_text
+                ref = st.session_state.reference_text
+                try:
+                    pause = max(0.0, float((os.getenv("GRADE_BATCH_SUBMISSION_GAP_SEC") or "1").strip() or "1"))
+                except ValueError:
+                    pause = 1.0
 
-                for idx, sub in enumerate(subs, start=1):
-                    status.write(f"Grading {idx}/{len(subs)}: {sub['name']}")
-                    result = grade_submission_fast(
-                        submission_text=sub["text"],
-                        items=active_items,
-                        teacher_key_text=st.session_state.teacher_key_text,
-                        reference_text=st.session_state.reference_text,
-                    )
-                    rec = build_result_record(sub["name"], result, sub["text"])
+                done = 0
+                for idx, sub in enumerate(subs):
+                    if idx > 0 and pause > 0:
+                        time.sleep(pause)
+                    try:
+                        result = grade_submission_fast(
+                            submission_text=sub["text"],
+                            items=active_items,
+                            teacher_key_text=tk,
+                            reference_text=ref,
+                            batch_submission=True,
+                        )
+                        rec = build_result_record(sub["name"], result, sub["text"])
+                    except Exception as exc:
+                        result = build_grade_failure_result(sub["text"], active_items, str(exc))
+                        rec = build_result_record(sub["name"], result, sub["text"])
                     records.append(rec)
+                    done += 1
+                    status.write(f"Grading {done}/{len(subs)}…")
+                    prog.progress(done / len(subs))
                     if save_history:
                         append_history(rec)
-                    prog.progress(idx / len(subs))
 
                 records.sort(key=lambda x: float(x.get("overall_score", 0)), reverse=True)
                 st.session_state.batch_results = records

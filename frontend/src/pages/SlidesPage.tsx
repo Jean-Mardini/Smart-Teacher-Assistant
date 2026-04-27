@@ -350,14 +350,10 @@ export function SlidesPage() {
     setLiveDeck(null)
     setLiveWarnings(null)
     try {
-      const res = await apiJson<LiveSlidesResponse>(
-        '/generate-slides',
-        {
-          method: 'POST',
-          body: JSON.stringify(liveSlidesBody()),
-        },
-        180_000,
-      )
+      const res = await apiJson<LiveSlidesResponse>('/generate-slides', {
+        method: 'POST',
+        body: JSON.stringify(liveSlidesBody()),
+      })
       assertLiveSlidesHaveImages(res)
       await preloadLiveSlideImages(res)
       if (import.meta.env.DEV) {
@@ -385,13 +381,9 @@ export function SlidesPage() {
     assertLiveSlidesHaveImages(liveDeck)
     setExporting(true)
     try {
-      const { blob, filename } = await apiPostBlob(
-        '/generate-slides/export-pptx',
-        {
-          slides: liveDeck.slides,
-        },
-        240_000,
-      )
+      const { blob, filename } = await apiPostBlob('/generate-slides/export-pptx', {
+        slides: liveDeck.slides,
+      })
       triggerDownload(blob, filename.endsWith('.pptx') ? filename : `${filename}.pptx`)
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Export failed')

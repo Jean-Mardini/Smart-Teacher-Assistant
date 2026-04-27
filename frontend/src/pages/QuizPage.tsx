@@ -1,5 +1,4 @@
 import { useState } from 'react'
-import type { CSSProperties } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { DocPicker } from '../components/DocPicker'
 import { apiJson, apiPostBlob, triggerDownload } from '../api/client'
@@ -64,23 +63,8 @@ const CREATION_CARDS: {
   },
 ]
 
-const cardGrid: CSSProperties = {
-  display: 'grid',
-  gridTemplateColumns: 'repeat(auto-fill, minmax(220px, 1fr))',
-  gap: '1rem',
-  alignItems: 'start',
-  marginBottom: '1.5rem',
-}
-
-const cardBase: CSSProperties = {
-  textAlign: 'left',
-  padding: '1.1rem 1rem',
-  borderRadius: '12px',
-  border: '1px solid var(--line, #e2e8f0)',
-  background: 'var(--panel, #fff)',
-  cursor: 'pointer',
-  transition: 'border-color 0.15s, box-shadow 0.15s',
-}
+const QUIZ_LIBRARY_HINT =
+  'Upload into the Library if needed, then pick one document. For import mode you can add a URL below; when set, it takes priority over the file for this run.'
 
 function clampInt(n: number, lo: number, hi: number) {
   if (!Number.isFinite(n)) return lo
@@ -200,8 +184,7 @@ export function QuizPage() {
     return null
   }
 
-  const canRun =
-    validateSource() === null && quizTotal >= 1 && quizTotal <= QUIZ_MAX_TOTAL
+  const canRun = validateSource() === null && quizTotal >= 1 && quizTotal <= QUIZ_MAX_TOTAL
 
   const hasQuizResult = Boolean(result?.quiz && result.quiz.length > 0)
 
@@ -218,7 +201,7 @@ export function QuizPage() {
     setExporting(true)
     setError(null)
     try {
-      const { blob, filename } = await apiPostBlob('/agents/quiz/export/moodle-xml', quizBody(), 120_000)
+      const { blob, filename } = await apiPostBlob('/agents/quiz/export/moodle-xml', quizBody())
       triggerDownload(blob, filename.endsWith('.xml') ? filename : `${filename}_quiz_moodle.xml`)
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Export failed')
@@ -245,14 +228,10 @@ export function QuizPage() {
     setError(null)
     setResult(null)
     try {
-      const res = await apiJson<QuizResult>(
-        '/agents/quiz',
-        {
-          method: 'POST',
-          body: JSON.stringify(quizBody()),
-        },
-        120_000,
-      )
+      const res = await apiJson<QuizResult>('/agents/quiz', {
+        method: 'POST',
+        body: JSON.stringify(quizBody()),
+      })
       setResult(res)
       const n = res.quiz?.length ?? 0
       if (n === 0) {
@@ -267,7 +246,7 @@ export function QuizPage() {
     }
   }
 
-  /** Sends quiz questions as a teacher-key rubric into Flexible Grader (Grade tab). */
+  /** Sends quiz questions as a QA-style rubric into Flexible Grader (Grade tab). */
   function exportQuizRubricToGrading() {
     const list = result?.quiz
     if (!list?.length) return
@@ -280,11 +259,11 @@ export function QuizPage() {
     navigate('/grade', {
       state: {
         rubric,
-        origin: 'teacher_key',
+        origin: 'qa',
         teacher_key_text: teacherKeyText,
         suggested_total_points: sumPts >= 1 ? sumPts : totalPoints,
         result_title_hint: titleHint,
-        importMessage: `Exported ${rubric.length} rubric row(s) from this quiz into Grading (teacher key). Adjust rubric on the Teacher key tab if needed, then use the Grade tab to score student submissions.`,
+        importMessage: `Exported ${rubric.length} rubric row(s) into Grading (QA). Open the QA rubric tab to review items if needed, then use the Grade tab for student text submissions.`,
       },
     })
   }
@@ -296,74 +275,73 @@ export function QuizPage() {
     return ''
   }
 
+  const showThread = Boolean(error || hasQuizResult)
+
   return (
-    <div className="studio-route summarize-page">
+    <div className="studio-route summarize-page dialogue-page">
       <h1 className="page-title">Quiz</h1>
       <p className="page-sub">
         Build MCQ, true/false, and short-answer items from a <strong>prompt</strong>, <strong>pasted text</strong>, a{' '}
-        <strong>library document</strong>, or a <strong>URL</strong>. Export to{' '}
-        <strong>Moodle XML</strong> for LMS import, or use <strong>Export rubric to Grading</strong> after a run to open
-        Flexible Grader with one row per question (exact for MCQ / true-false, conceptual for short answer).
+        <strong>library document</strong>, or a <strong>URL</strong>. Export to <strong>Moodle XML</strong> for LMS
+        import, or use <strong>Export rubric to Grading</strong> after a run to open Flexible Grader with one row per
+        question (exact for MCQ / true-false, conceptual for short answer).
       </p>
 
-      <h2 style={{ fontSize: '1.1rem', margin: '0 0 0.75rem', fontWeight: 600 }}>How would you like to get started?</h2>
-      <div style={cardGrid}>
-        {CREATION_CARDS.map((c) => {
-          const active = creationMode === c.id
-          return (
-            <button
-              key={c.id}
-              type="button"
-              onClick={() => {
-                setCreationMode(c.id)
-                setError(null)
-              }}
-              style={{
-                ...cardBase,
-                borderColor: active ? 'var(--accent, #3b5bdb)' : (cardBase.border as string),
-                boxShadow: active ? '0 0 0 2px color-mix(in srgb, var(--accent, #3b5bdb) 25%, transparent)' : 'none',
-              }}
-            >
-              <div style={{ fontSize: '1.75rem', marginBottom: '0.35rem', opacity: 0.85 }}>{c.icon}</div>
-              <div style={{ display: 'flex', alignItems: 'center', gap: '0.35rem', flexWrap: 'wrap' }}>
-                <strong style={{ fontSize: '1rem' }}>{c.title}</strong>
-                {c.badge ? (
-                  <span
-                    style={{
-                      fontSize: '0.65rem',
-                      textTransform: 'uppercase',
-                      letterSpacing: '0.04em',
-                      color: 'var(--ink-soft)',
-                      border: '1px solid var(--line)',
-                      borderRadius: '4px',
-                      padding: '0.1rem 0.35rem',
-                    }}
-                  >
-                    {c.badge}
-                  </span>
-                ) : null}
-              </div>
-              <p style={{ margin: '0.45rem 0 0', fontSize: '0.85rem', color: 'var(--ink-soft)', lineHeight: 1.35 }}>
-                {c.description}
+      <div className="dialogue-shell">
+        <main className="dialogue-main">
+          <section className="dialogue-card dialogue-card--scope" aria-labelledby="quiz-scope-heading">
+            <div className="dialogue-card__head">
+              <h2 id="quiz-scope-heading" className="dialogue-card__title">
+                Scope
+              </h2>
+              <p className="dialogue-card__lede">
+                Pick how the generator reads your material, then fill the fields below. Library and import modes use
+                the same document resolution as slide generation.
               </p>
-            </button>
-          )
-        })}
-      </div>
+            </div>
 
-      <div className="studio-sheet">
-        <div className="studio-sheet__grid">
-          <div className="studio-main">
-          <div className="studio-panel">
-            <h2>Source</h2>
-            <p className="summarize-lede">
-              {creationMode === 'template'
-                ? 'Upload in the Library if needed, then pick the file to build the quiz from.'
-                : 'Fill the fields for your selected mode. The server resolves sources the same way as slide generation.'}
-            </p>
+            <div className="dialogue-sidebar__block">
+              <span className="summarize-field-label">Source type</span>
+              <div className="dialogue-length summarize-length" role="group" aria-label="Quiz source type">
+                {CREATION_CARDS.map((c) => {
+                  const active = creationMode === c.id
+                  return (
+                    <button
+                      key={c.id}
+                      type="button"
+                      className={active ? 'is-on' : ''}
+                      onClick={() => {
+                        setCreationMode(c.id)
+                        setError(null)
+                      }}
+                    >
+                      <span style={{ marginRight: '0.35rem', opacity: 0.9 }} aria-hidden>
+                        {c.icon}
+                      </span>
+                      {c.title}
+                      {c.badge ? (
+                        <span
+                          style={{
+                            marginLeft: '0.35rem',
+                            fontSize: '0.65rem',
+                            textTransform: 'uppercase',
+                            letterSpacing: '0.04em',
+                            color: 'var(--ink-soft)',
+                            fontWeight: 600,
+                          }}
+                        >
+                          {c.badge}
+                        </span>
+                      ) : null}
+                      <span className="summarize-length-hint">{c.description}</span>
+                    </button>
+                  )
+                })}
+              </div>
+            </div>
 
             {creationMode === 'generate' && (
-              <div className="field">
+              <div className="field dialogue-field-tight">
                 <label htmlFor="quiz-oneprompt">One-line prompt</label>
                 <input
                   id="quiz-oneprompt"
@@ -371,26 +349,28 @@ export function QuizPage() {
                   value={promptLine}
                   onChange={(e) => setPromptLine(e.target.value)}
                   placeholder="e.g. Photosynthesis — grade 9, definitions and Calvin cycle"
+                  className="dialogue-input-mono"
                 />
               </div>
             )}
 
             {creationMode === 'paste' && (
-              <div className="field">
+              <div className="field dialogue-field-tight">
                 <label htmlFor="quiz-paste">Notes or outline</label>
                 <textarea
                   id="quiz-paste"
-                  rows={10}
+                  rows={8}
                   value={pastedText}
                   onChange={(e) => setPastedText(e.target.value)}
                   placeholder="Paste bullets, a lesson plan, or raw notes…"
-                  style={{ width: '100%', fontFamily: 'inherit', fontSize: '0.95rem' }}
+                  className="dialogue-composer__textarea"
+                  style={{ minHeight: '8rem' }}
                 />
               </div>
             )}
 
             {(creationMode === 'generate' || creationMode === 'paste') && (
-              <div className="field">
+              <div className="field dialogue-field-tight">
                 <label htmlFor="quiz-dtitle">Quiz title (optional)</label>
                 <input
                   id="quiz-dtitle"
@@ -408,9 +388,12 @@ export function QuizPage() {
                   value={docId ? [docId] : []}
                   onChange={(ids) => setDocId(ids[0] ?? '')}
                   accept=".pdf,.docx,.pptx,.txt,.md"
+                  compact
+                  maxSelection={1}
+                  compactHint={QUIZ_LIBRARY_HINT}
                 />
                 {creationMode === 'template' && (
-                  <div className="field" style={{ marginTop: '1rem' }}>
+                  <div className="field dialogue-field-tight">
                     <label htmlFor="quiz-lib-title">Quiz title (optional)</label>
                     <input
                       id="quiz-lib-title"
@@ -422,95 +405,59 @@ export function QuizPage() {
                   </div>
                 )}
                 {creationMode === 'import' && (
-                  <div className="field" style={{ marginTop: '1rem' }}>
-                    <label htmlFor="quiz-url">Or import from URL</label>
-                    <input
-                      id="quiz-url"
-                      type="url"
-                      value={importUrl}
-                      onChange={(e) => setImportUrl(e.target.value)}
-                      placeholder="https://… (text extracted on the server)"
-                    />
-                    {importUrl.trim() ? (
-                      <p style={{ margin: '0.35rem 0 0', fontSize: '0.85rem', color: 'var(--ink-soft)' }}>
-                        When a URL is set, it takes priority over the library document for this run.
-                      </p>
-                    ) : null}
-                  </div>
-                )}
-                {creationMode === 'import' && (
-                  <div className="field">
-                    <label htmlFor="quiz-import-title">Quiz title (optional)</label>
-                    <input
-                      id="quiz-import-title"
-                      type="text"
-                      value={sourceTitle}
-                      onChange={(e) => setSourceTitle(e.target.value)}
-                      placeholder="Override title for URL import"
-                    />
-                  </div>
+                  <>
+                    <div className="field dialogue-field-tight">
+                      <label htmlFor="quiz-url">Or import from URL</label>
+                      <input
+                        id="quiz-url"
+                        type="url"
+                        value={importUrl}
+                        onChange={(e) => setImportUrl(e.target.value)}
+                        placeholder="https://… (text extracted on the server)"
+                        className="dialogue-input-mono"
+                      />
+                      {importUrl.trim() ? (
+                        <p className="dialogue-field-hint">
+                          When a URL is set, it takes priority over the library document for this run.
+                        </p>
+                      ) : null}
+                    </div>
+                    <div className="field dialogue-field-tight">
+                      <label htmlFor="quiz-import-title">Quiz title (optional)</label>
+                      <input
+                        id="quiz-import-title"
+                        type="text"
+                        value={sourceTitle}
+                        onChange={(e) => setSourceTitle(e.target.value)}
+                        placeholder="Override title for URL import"
+                      />
+                    </div>
+                  </>
                 )}
               </>
             )}
-          </div>
+          </section>
 
-          <div className="studio-panel">
-            <h2>Question counts</h2>
-            <p className="summarize-lede">
-              Set counts for each type (max <strong>{QUIZ_MAX_TOTAL}</strong> combined). Large totals may be slower or
-              hit model limits.
-            </p>
+          <aside className="dialogue-sidebar" aria-labelledby="quiz-options-heading">
+            <h3 id="quiz-options-heading" className="dialogue-sidebar__title">
+              Mix &amp; difficulty
+            </h3>
+            <p className="dialogue-sidebar__lede">These apply to the next quiz generation only.</p>
 
-            <div
-              style={{
-                display: 'grid',
-                gap: '0.85rem',
-                gridTemplateColumns: 'repeat(auto-fit, minmax(min(100%, 220px), 1fr))',
-                marginBottom: '0.85rem',
-              }}
-            >
-              <div
-                className="field"
-                style={{
-                  marginBottom: 0,
-                  padding: '0.75rem 0.8rem',
-                  borderRadius: '14px',
-                  background: '#fff',
-                  border: '1px solid var(--line)',
-                }}
-              >
-                <label htmlFor="n-mcq">Multiple choice (MCQ)</label>
-                <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: '0.65rem' }}>
-                  <div
-                    style={{
-                      minWidth: '2.75rem',
-                      height: '2.75rem',
-                      borderRadius: '12px',
-                      background: '#f4f3f0',
-                      border: '1px solid var(--line)',
-                      display: 'grid',
-                      placeItems: 'center',
-                      fontFamily: 'var(--font-display)',
-                      fontSize: '1.1rem',
-                      fontWeight: 700,
-                      color: 'var(--ink)',
-                    }}
-                    aria-hidden
-                  >
-                    {nMcq}
-                  </div>
-                  <div style={{ flex: '1 1 140px', minWidth: 0 }}>
-                    <input
-                      id="n-mcq-range"
-                      type="range"
-                      min={0}
-                      max={QUIZ_MAX_TOTAL}
-                      value={nMcq}
-                      onChange={(e) => setNMcqSafe(Number(e.target.value))}
-                      aria-label="MCQ count"
-                      style={{ width: '100%', accentColor: '#5c6670' }}
-                    />
-                  </div>
+            <div className="dialogue-sidebar__block">
+              <span className="summarize-field-label">Multiple choice (MCQ)</span>
+              <div className="field dialogue-field-tight" style={{ marginBottom: 0 }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '0.65rem', flexWrap: 'wrap' }}>
+                  <input
+                    id="n-mcq-range"
+                    type="range"
+                    min={0}
+                    max={QUIZ_MAX_TOTAL}
+                    value={nMcq}
+                    onChange={(e) => setNMcqSafe(Number(e.target.value))}
+                    aria-label="MCQ count"
+                    style={{ flex: '1 1 140px', minWidth: 0, width: '100%', accentColor: '#5c6670' }}
+                  />
                   <input
                     id="n-mcq"
                     type="number"
@@ -523,49 +470,22 @@ export function QuizPage() {
                   />
                 </div>
               </div>
+            </div>
 
-              <div
-                className="field"
-                style={{
-                  marginBottom: 0,
-                  padding: '0.75rem 0.8rem',
-                  borderRadius: '14px',
-                  background: '#fff',
-                  border: '1px solid var(--line)',
-                }}
-              >
-                <label htmlFor="n-short">Short answer (sentence)</label>
-                <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: '0.65rem' }}>
-                  <div
-                    style={{
-                      minWidth: '2.75rem',
-                      height: '2.75rem',
-                      borderRadius: '12px',
-                      background: '#f4f3f0',
-                      border: '1px solid var(--line)',
-                      display: 'grid',
-                      placeItems: 'center',
-                      fontFamily: 'var(--font-display)',
-                      fontSize: '1.1rem',
-                      fontWeight: 700,
-                      color: 'var(--ink)',
-                    }}
-                    aria-hidden
-                  >
-                    {nShort}
-                  </div>
-                  <div style={{ flex: '1 1 140px', minWidth: 0 }}>
-                    <input
-                      id="n-short-range"
-                      type="range"
-                      min={0}
-                      max={QUIZ_MAX_TOTAL}
-                      value={nShort}
-                      onChange={(e) => setNShortSafe(Number(e.target.value))}
-                      aria-label="Short answer count"
-                      style={{ width: '100%', accentColor: '#5c6670' }}
-                    />
-                  </div>
+            <div className="dialogue-sidebar__block">
+              <span className="summarize-field-label">Short answer</span>
+              <div className="field dialogue-field-tight" style={{ marginBottom: 0 }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '0.65rem', flexWrap: 'wrap' }}>
+                  <input
+                    id="n-short-range"
+                    type="range"
+                    min={0}
+                    max={QUIZ_MAX_TOTAL}
+                    value={nShort}
+                    onChange={(e) => setNShortSafe(Number(e.target.value))}
+                    aria-label="Short answer count"
+                    style={{ flex: '1 1 140px', minWidth: 0, width: '100%', accentColor: '#5c6670' }}
+                  />
                   <input
                     id="n-short"
                     type="number"
@@ -578,49 +498,22 @@ export function QuizPage() {
                   />
                 </div>
               </div>
+            </div>
 
-              <div
-                className="field"
-                style={{
-                  marginBottom: 0,
-                  padding: '0.75rem 0.8rem',
-                  borderRadius: '14px',
-                  background: '#fff',
-                  border: '1px solid var(--line)',
-                }}
-              >
-                <label htmlFor="n-tf">True / false</label>
-                <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: '0.65rem' }}>
-                  <div
-                    style={{
-                      minWidth: '2.75rem',
-                      height: '2.75rem',
-                      borderRadius: '12px',
-                      background: '#f4f3f0',
-                      border: '1px solid var(--line)',
-                      display: 'grid',
-                      placeItems: 'center',
-                      fontFamily: 'var(--font-display)',
-                      fontSize: '1.1rem',
-                      fontWeight: 700,
-                      color: 'var(--ink)',
-                    }}
-                    aria-hidden
-                  >
-                    {nTf}
-                  </div>
-                  <div style={{ flex: '1 1 140px', minWidth: 0 }}>
-                    <input
-                      id="n-tf-range"
-                      type="range"
-                      min={0}
-                      max={QUIZ_MAX_TOTAL}
-                      value={nTf}
-                      onChange={(e) => setNTfSafe(Number(e.target.value))}
-                      aria-label="True/false count"
-                      style={{ width: '100%', accentColor: '#a67c52' }}
-                    />
-                  </div>
+            <div className="dialogue-sidebar__block">
+              <span className="summarize-field-label">True / false</span>
+              <div className="field dialogue-field-tight" style={{ marginBottom: 0 }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '0.65rem', flexWrap: 'wrap' }}>
+                  <input
+                    id="n-tf-range"
+                    type="range"
+                    min={0}
+                    max={QUIZ_MAX_TOTAL}
+                    value={nTf}
+                    onChange={(e) => setNTfSafe(Number(e.target.value))}
+                    aria-label="True/false count"
+                    style={{ flex: '1 1 140px', minWidth: 0, width: '100%', accentColor: '#a67c52' }}
+                  />
                   <input
                     id="n-tf"
                     type="number"
@@ -646,242 +539,279 @@ export function QuizPage() {
               {quizTotal < 1 ? ' — pick at least one.' : null}
               {quizTotal > QUIZ_MAX_TOTAL ? ' — over server limit.' : null}
             </p>
-          </div>
-          </div>
 
-        <aside className="studio-aside">
-          <div>
-            <span className="summarize-field-label">Question mix</span>
-            <div
-              style={{
-                height: '10px',
-                borderRadius: '99px',
-                overflow: 'hidden',
-                display: 'flex',
-                opacity: quizTotal > 0 ? 1 : 0.45,
-                background: '#ecebe8',
-              }}
-            >
-              <div
-                style={{
-                  width: quizTotal > 0 ? `${(nMcq / quizTotal) * 100}%` : '33.33%',
-                  background: '#5c6670',
-                  transition: 'width 0.2s ease',
-                }}
-              />
-              <div
-                style={{
-                  width: quizTotal > 0 ? `${(nTf / quizTotal) * 100}%` : '33.33%',
-                  background: '#a67c52',
-                  transition: 'width 0.2s ease',
-                }}
-              />
-              <div
-                style={{
-                  width: quizTotal > 0 ? `${(nShort / quizTotal) * 100}%` : '33.33%',
-                  background: '#d9d7d2',
-                  transition: 'width 0.2s ease',
-                }}
-              />
-            </div>
-            <p style={{ margin: '0.45rem 0 0', fontSize: '0.8rem', color: 'var(--ink-soft)' }}>
-              <strong style={{ color: 'var(--ink)' }}>{nMcq}</strong> MCQ ·{' '}
-              <strong style={{ color: 'var(--ink)' }}>{nTf}</strong> T/F ·{' '}
-              <strong style={{ color: 'var(--ink)' }}>{nShort}</strong> short
-            </p>
-          </div>
-
-          <div className="summarize-stat">
-            <span>Questions in this run</span>
-            <strong>
-              {quizTotal} / {QUIZ_MAX_TOTAL}
-            </strong>
-          </div>
-
-          <div>
-            <span className="summarize-field-label">Difficulty</span>
-            <div className="summarize-length" role="group" aria-label="Difficulty">
-              {DIFFICULTY_LEVELS.map((lvl) => (
-                <button
-                  key={lvl.id}
-                  type="button"
-                  className={difficulty === lvl.id ? 'is-on' : ''}
-                  onClick={() => setDifficulty(lvl.id)}
-                >
-                  {lvl.label}
-                  <span className="summarize-length-hint">{lvl.hint}</span>
-                </button>
-              ))}
-            </div>
-          </div>
-
-          <div className="field" style={{ marginBottom: 0 }}>
-            <label htmlFor="quiz-total-points">Total points (whole quiz)</label>
-            <input
-              id="quiz-total-points"
-              type="number"
-              min={1}
-              max={2000}
-              value={totalPoints}
-              onChange={(e) => setTotalPoints(clampInt(Number(e.target.value), 1, 2000))}
-              aria-describedby="quiz-total-points-hint"
-            />
-            <p id="quiz-total-points-hint" style={{ margin: '0.35rem 0 0', fontSize: '0.8rem', color: 'var(--ink-soft)' }}>
-              Split evenly across questions (at least 1 point each). Moodle export uses these as default grades.
-            </p>
-          </div>
-
-          <button
-            type="button"
-            className="btn btn--accent summarize-run"
-            disabled={loading || !canRun}
-            onClick={() => void run()}
-          >
-            {loading ? 'Generating…' : 'Generate quiz'}
-          </button>
-          <button
-            type="button"
-            className="btn btn--ghost summarize-run"
-            disabled={exporting || !canRun}
-            onClick={() => void exportMoodle()}
-          >
-            {exporting ? 'Exporting…' : 'Download Moodle XML'}
-          </button>
-          <button
-            type="button"
-            className="btn btn--ghost summarize-run"
-            disabled={!hasQuizResult}
-            title={hasQuizResult ? 'Open Grading with a rubric built from this quiz' : 'Generate a quiz first'}
-            onClick={() => exportQuizRubricToGrading()}
-          >
-            Export rubric to Grading
-          </button>
-        </aside>
-        </div>
-      </div>
-
-      {error && <div className="error">{error}</div>}
-
-      {result?.quiz && result.quiz.length > 0 && (
-        <div className="studio-sheet studio-sheet--spaced studio-sheet--flat studio-results">
-          <div
-            className="studio-results__head"
-            style={{
-              display: 'flex',
-              justifyContent: 'space-between',
-              alignItems: 'flex-start',
-              gap: '1rem',
-              flexWrap: 'wrap',
-            }}
-          >
             <div>
-              <h2 style={{ margin: 0 }}>
-                {(result.quiz_title && result.quiz_title.trim()) || 'Quiz'}
-              </h2>
-              <p style={{ margin: '0.35rem 0 0', fontSize: '0.92rem', color: 'var(--ink-soft)' }}>
-                {result.quiz.length} question{result.quiz.length === 1 ? '' : 's'}
-                {(() => {
-                  const pts = result.quiz!.reduce((s, q) => s + (typeof q.points === 'number' ? q.points : 0), 0)
-                  return pts > 0 ? ` · ${pts} points total` : null
-                })()}
+              <span className="summarize-field-label">Question mix</span>
+              <div
+                style={{
+                  height: '10px',
+                  borderRadius: '99px',
+                  overflow: 'hidden',
+                  display: 'flex',
+                  opacity: quizTotal > 0 ? 1 : 0.45,
+                  background: '#ecebe8',
+                }}
+              >
+                <div
+                  style={{
+                    width: quizTotal > 0 ? `${(nMcq / quizTotal) * 100}%` : '33.33%',
+                    background: '#5c6670',
+                    transition: 'width 0.2s ease',
+                  }}
+                />
+                <div
+                  style={{
+                    width: quizTotal > 0 ? `${(nTf / quizTotal) * 100}%` : '33.33%',
+                    background: '#a67c52',
+                    transition: 'width 0.2s ease',
+                  }}
+                />
+                <div
+                  style={{
+                    width: quizTotal > 0 ? `${(nShort / quizTotal) * 100}%` : '33.33%',
+                    background: '#d9d7d2',
+                    transition: 'width 0.2s ease',
+                  }}
+                />
+              </div>
+              <p style={{ margin: '0.45rem 0 0', fontSize: '0.8rem', color: 'var(--ink-soft)' }}>
+                <strong style={{ color: 'var(--ink)' }}>{nMcq}</strong> MCQ ·{' '}
+                <strong style={{ color: 'var(--ink)' }}>{nTf}</strong> T/F ·{' '}
+                <strong style={{ color: 'var(--ink)' }}>{nShort}</strong> short
               </p>
             </div>
-            <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: '0.5rem' }}>
-              <button type="button" className="btn btn--accent" onClick={() => exportQuizRubricToGrading()}>
+
+            <div className="summarize-stat">
+              <span>Questions in this run</span>
+              <strong>
+                {quizTotal} / {QUIZ_MAX_TOTAL}
+              </strong>
+            </div>
+
+            <div className="dialogue-sidebar__block">
+              <span className="summarize-field-label">Difficulty</span>
+              <div className="dialogue-length summarize-length" role="group" aria-label="Difficulty">
+                {DIFFICULTY_LEVELS.map((lvl) => (
+                  <button
+                    key={lvl.id}
+                    type="button"
+                    className={difficulty === lvl.id ? 'is-on' : ''}
+                    onClick={() => setDifficulty(lvl.id)}
+                  >
+                    {lvl.label}
+                    <span className="summarize-length-hint">{lvl.hint}</span>
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <div className="field dialogue-field-tight">
+              <label htmlFor="quiz-total-points">Total points (whole quiz)</label>
+              <input
+                id="quiz-total-points"
+                type="number"
+                min={1}
+                max={2000}
+                value={totalPoints}
+                onChange={(e) => setTotalPoints(clampInt(Number(e.target.value), 1, 2000))}
+                aria-describedby="quiz-total-points-hint"
+              />
+              <p id="quiz-total-points-hint" className="dialogue-field-hint">
+                Split evenly across questions (at least 1 point each). Moodle export uses these as default grades.
+              </p>
+            </div>
+          </aside>
+
+          {showThread && (
+            <section className="dialogue-card dialogue-card--thread" aria-label="Quiz output">
+              <div className="dialogue-thread__toolbar">
+                <span className="dialogue-thread__badge">Quiz</span>
+                {hasQuizResult ? (
+                  <div className="dialogue-thread__export-actions">
+                    <button
+                      type="button"
+                      className="btn btn--primary"
+                      disabled={exporting || !canRun}
+                      onClick={() => void exportMoodle()}
+                    >
+                      {exporting ? 'Exporting…' : 'Moodle XML'}
+                    </button>
+                    <button type="button" className="btn btn--ghost" onClick={() => exportQuizRubricToGrading()}>
+                      Rubric → Grading
+                    </button>
+                  </div>
+                ) : null}
+              </div>
+              <div className="dialogue-thread__body summarize-results__body">
+                {error && <div className="error dialogue-thread__error">{error}</div>}
+                {hasQuizResult && (
+                  <div>
+                    <div style={{ marginBottom: '1rem' }}>
+                      <h3 style={{ margin: 0, fontSize: '1.05rem' }}>
+                        {(result!.quiz_title && result!.quiz_title!.trim()) || 'Quiz'}
+                      </h3>
+                      <p style={{ margin: '0.35rem 0 0', fontSize: '0.92rem', color: 'var(--ink-soft)' }}>
+                        {result!.quiz!.length} question{result!.quiz!.length === 1 ? '' : 's'}
+                        {(() => {
+                          const pts = result!.quiz!.reduce(
+                            (s, q) => s + (typeof q.points === 'number' ? q.points : 0),
+                            0,
+                          )
+                          return pts > 0 ? ` · ${pts} points total` : null
+                        })()}
+                      </p>
+                      <p style={{ margin: '0.5rem 0 0', fontSize: '0.82rem', color: 'var(--ink-soft)', maxWidth: '42rem' }}>
+                        Use <strong>Rubric → Grading</strong> in the toolbar to open the Grade tab with one rubric row
+                        per question.
+                      </p>
+                    </div>
+                    <div
+                      style={{
+                        display: 'grid',
+                        gap: '0.85rem',
+                        gridTemplateColumns: 'repeat(auto-fill, minmax(min(100%, 280px), 1fr))',
+                      }}
+                    >
+                      {result!.quiz!.map((q, idx) => {
+                        const isMcq = q.type === 'mcq'
+                        const isTf = q.type === 'true_false'
+                        const accent = isMcq ? '#8a9199' : isTf ? '#a67c52' : '#b5bcc4'
+                        return (
+                          <div
+                            key={idx}
+                            style={{
+                              position: 'relative',
+                              padding: '0.85rem 1rem 0.95rem 1rem',
+                              borderRadius: '14px',
+                              border: '1px solid var(--line)',
+                              borderLeft: `4px solid ${accent}`,
+                              background: '#fff',
+                              boxShadow: '0 2px 12px rgba(21, 36, 51, 0.04)',
+                            }}
+                          >
+                            <div
+                              style={{
+                                display: 'flex',
+                                alignItems: 'center',
+                                gap: '0.5rem',
+                                marginBottom: '0.45rem',
+                                flexWrap: 'wrap',
+                              }}
+                            >
+                              <span
+                                style={{
+                                  fontSize: '0.7rem',
+                                  fontWeight: 700,
+                                  letterSpacing: '0.06em',
+                                  textTransform: 'uppercase',
+                                  color: 'var(--ink-soft)',
+                                  background: '#f0efec',
+                                  padding: '0.2rem 0.45rem',
+                                  borderRadius: '6px',
+                                }}
+                              >
+                                Q{idx + 1}
+                              </span>
+                              {q.type ? (
+                                <span
+                                  style={{
+                                    fontSize: '0.7rem',
+                                    color: 'var(--ink-soft)',
+                                    fontWeight: 600,
+                                  }}
+                                >
+                                  {q.type === 'true_false' ? 'true/false' : q.type}
+                                </span>
+                              ) : null}
+                              {typeof q.points === 'number' && q.points > 0 ? (
+                                <span
+                                  style={{
+                                    fontSize: '0.7rem',
+                                    fontWeight: 700,
+                                    color: 'var(--ink)',
+                                    marginLeft: '0.15rem',
+                                  }}
+                                >
+                                  {q.points} pt{q.points === 1 ? '' : 's'}
+                                </span>
+                              ) : null}
+                            </div>
+                            <p style={{ fontWeight: 600, margin: '0 0 0.45rem', lineHeight: 1.35 }}>{q.question}</p>
+                            {q.options && q.options.length > 0 && (
+                              <ol style={{ margin: '0.15rem 0 0.35rem', paddingLeft: '1.1rem', fontSize: '0.92rem' }}>
+                                {q.options.map((o, i) => (
+                                  <li key={i} style={{ marginBottom: '0.2rem' }}>
+                                    {o}
+                                  </li>
+                                ))}
+                              </ol>
+                            )}
+                            {q.explanation && (
+                              <p
+                                style={{
+                                  fontSize: '0.85rem',
+                                  color: 'var(--ink-soft)',
+                                  margin: '0.35rem 0 0',
+                                  lineHeight: 1.45,
+                                }}
+                              >
+                                {q.explanation}
+                              </p>
+                            )}
+                          </div>
+                        )
+                      })}
+                    </div>
+                  </div>
+                )}
+              </div>
+            </section>
+          )}
+
+          <section className="dialogue-card dialogue-card--composer" aria-labelledby="quiz-run-heading">
+            <h2 id="quiz-run-heading" className="dialogue-composer__label">
+              Generate
+            </h2>
+            <p className="dialogue-card__lede" style={{ margin: '0 0 0.85rem' }}>
+              Large question counts can take longer — keep this tab open until results appear above.
+            </p>
+            <div className="dialogue-composer__actions dialogue-composer__actions--full-run">
+              <button
+                type="button"
+                className="btn btn--accent summarize-run"
+                disabled={loading || !canRun}
+                onClick={() => void run()}
+              >
+                {loading ? 'Generating…' : 'Generate quiz'}
+              </button>
+            </div>
+            <div
+              className="dialogue-composer__actions"
+              style={{ marginTop: '0.65rem', flexWrap: 'wrap', gap: '0.5rem', justifyContent: 'stretch' }}
+            >
+              <button
+                type="button"
+                className="btn btn--ghost"
+                style={{ flex: '1 1 12rem' }}
+                disabled={exporting || !canRun}
+                onClick={() => void exportMoodle()}
+              >
+                {exporting ? 'Exporting…' : 'Download Moodle XML'}
+              </button>
+              <button
+                type="button"
+                className="btn btn--ghost"
+                style={{ flex: '1 1 12rem' }}
+                disabled={!hasQuizResult}
+                title={hasQuizResult ? 'Open Grading with a rubric built from this quiz' : 'Generate a quiz first'}
+                onClick={() => exportQuizRubricToGrading()}
+              >
                 Export rubric to Grading
               </button>
-              <span style={{ fontSize: '0.78rem', color: 'var(--ink-soft)', maxWidth: '22rem', textAlign: 'right' }}>
-                Opens <strong>Grading</strong> with a teacher-key rubric and answer key text so you can edit rows and
-                score student work.
-              </span>
             </div>
-          </div>
-          <div className="studio-results__body summarize-results__body">
-            <div
-              style={{
-                display: 'grid',
-                gap: '0.85rem',
-                gridTemplateColumns: 'repeat(auto-fill, minmax(min(100%, 280px), 1fr))',
-              }}
-            >
-              {result.quiz.map((q, idx) => {
-                const isMcq = q.type === 'mcq'
-                const isTf = q.type === 'true_false'
-                const accent = isMcq ? '#8a9199' : isTf ? '#a67c52' : '#b5bcc4'
-                return (
-                  <div
-                    key={idx}
-                    style={{
-                      position: 'relative',
-                      padding: '0.85rem 1rem 0.95rem 1rem',
-                      borderRadius: '14px',
-                      border: '1px solid var(--line)',
-                      borderLeft: `4px solid ${accent}`,
-                      background: '#fff',
-                      boxShadow: '0 2px 12px rgba(21, 36, 51, 0.04)',
-                    }}
-                  >
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '0.45rem', flexWrap: 'wrap' }}>
-                      <span
-                        style={{
-                          fontSize: '0.7rem',
-                          fontWeight: 700,
-                          letterSpacing: '0.06em',
-                          textTransform: 'uppercase',
-                          color: 'var(--ink-soft)',
-                          background: '#f0efec',
-                          padding: '0.2rem 0.45rem',
-                          borderRadius: '6px',
-                        }}
-                      >
-                        Q{idx + 1}
-                      </span>
-                      {q.type ? (
-                        <span
-                          style={{
-                            fontSize: '0.7rem',
-                            color: 'var(--ink-soft)',
-                            fontWeight: 600,
-                          }}
-                        >
-                          {q.type === 'true_false' ? 'true/false' : q.type}
-                        </span>
-                      ) : null}
-                      {typeof q.points === 'number' && q.points > 0 ? (
-                        <span
-                          style={{
-                            fontSize: '0.7rem',
-                            fontWeight: 700,
-                            color: 'var(--ink)',
-                            marginLeft: '0.15rem',
-                          }}
-                        >
-                          {q.points} pt{q.points === 1 ? '' : 's'}
-                        </span>
-                      ) : null}
-                    </div>
-                    <p style={{ fontWeight: 600, margin: '0 0 0.45rem', lineHeight: 1.35 }}>{q.question}</p>
-                    {q.options && q.options.length > 0 && (
-                      <ol style={{ margin: '0.15rem 0 0.35rem', paddingLeft: '1.1rem', fontSize: '0.92rem' }}>
-                        {q.options.map((o, i) => (
-                          <li key={i} style={{ marginBottom: '0.2rem' }}>
-                            {o}
-                          </li>
-                        ))}
-                      </ol>
-                    )}
-                    {q.explanation && (
-                      <p style={{ fontSize: '0.85rem', color: 'var(--ink-soft)', margin: '0.35rem 0 0', lineHeight: 1.45 }}>
-                        {q.explanation}
-                      </p>
-                    )}
-                  </div>
-                )
-              })}
-            </div>
-          </div>
-        </div>
-      )}
+          </section>
+        </main>
+      </div>
     </div>
   )
 }

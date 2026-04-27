@@ -1,6 +1,38 @@
 import { useEffect, useRef, useState } from 'react'
 import { useLocation } from 'react-router-dom'
-import { apiDownload, apiFormJson, apiJson, apiStream, apiUpload } from '../api/client'
+import {
+  apiDownload,
+  apiFormJson,
+  apiJson,
+  apiPostEvaluationBatchGradeStream,
+  apiStream,
+  apiUpload,
+} from '../api/client'
+import type { EvaluationBatchGradeProgress } from '../api/client'
+
+function formatDurationSeconds(totalSec: number): string {
+  const s = Math.max(0, Math.floor(totalSec))
+  const m = Math.floor(s / 60)
+  const r = s % 60
+  if (m === 0) return `${r}s`
+  return `${m}m ${r}s`
+}
+
+function formatBatchGradeProgressLine(p: EvaluationBatchGradeProgress): string {
+  const { completed, total, current_title, elapsed_sec, estimated_remaining_sec } = p
+  if (total <= 0) return `Grading batch… ${formatDurationSeconds(elapsed_sec)} elapsed`
+  const pct = Math.min(100, Math.round((completed / total) * 100))
+  let rem: string
+  if (estimated_remaining_sec == null) {
+    rem = 'estimating time remaining…'
+  } else if (estimated_remaining_sec <= 0 || completed >= total) {
+    rem = 'finishing up…'
+  } else {
+    rem = `~${formatDurationSeconds(Math.ceil(estimated_remaining_sec))} remaining (estimate)`
+  }
+  const titleShort = current_title.length > 48 ? `${current_title.slice(0, 46)}…` : current_title
+  return `${completed} of ${total} done (${pct}%) · ${rem} · ${formatDurationSeconds(Math.floor(elapsed_sec))} elapsed — ${titleShort}`
+}
 
 type DocRow = {
   document_id: string
@@ -24,6 +56,12 @@ type RubricStreamEvent = {
   message?: string
   done?: boolean
   error?: string
+  rubric_title?: string | null
+  summary?: string[]
+  items?: RubricItem[]
+}
+
+type RubricGenerationResponse = {
   rubric_title?: string | null
   summary?: string[]
   items?: RubricItem[]
@@ -95,8 +133,39 @@ type HistoryBatch = {
 }
 type HistoryResponse = { records?: EvaluationResult[]; batches?: HistoryBatch[]; stats?: HistoryStats }
 
+/** Extensions the API stores in the knowledge base for RAG (must match server ``ALLOWED_EXTENSIONS``). */
 const LIBRARY_ACCEPT = '.pdf,.docx,.pptx,.txt,.md,.json'
 const PARSE_ACCEPT = '.pdf,.docx,.pptx,.txt,.md,.json,.csv,.html,.rtf,.zip'
+const MOODLE_XML_ACCEPT = '.xml'
+
+type DocumentUploadRow = {
+  filename: string
+  stored_path: string
+  filetype: string
+  reused_existing?: boolean
+}
+
+function normalizeFsPath(p: string) {
+  return p.replace(/\\/g, '/').toLowerCase()
+}
+
+function resolveDocIdsFromUploadRows(docsList: DocRow[], uploads: DocumentUploadRow[]): string[] {
+  const ids: string[] = []
+  for (const u of uploads) {
+    const want = normalizeFsPath(u.stored_path)
+    const base = (u.filename || '').split(/[/\\]/).pop()?.toLowerCase() || ''
+    const hit =
+      docsList.find((d) => normalizeFsPath(d.path) === want) ||
+      (base ? docsList.find((d) => normalizeFsPath(d.path).endsWith(`/${base}`) || d.path.toLowerCase().endsWith(base)) : undefined)
+    if (hit) ids.push(hit.document_id)
+  }
+  return ids
+}
+
+function isKbLibraryFile(f: File): boolean {
+  const n = f.name.toLowerCase()
+  return ['.pdf', '.docx', '.pptx', '.txt', '.md', '.json'].some((ext) => n.endsWith(ext))
+}
 
 function prettyJson(value: unknown) {
   return JSON.stringify(value, null, 2)
@@ -206,6 +275,12 @@ function rubricNeedsReference(items: RubricItem[]) {
   })
 }
 
+function presetOriginLabel(origin?: string) {
+  if (origin === 'teacher_key' || origin === 'qa') return 'QA'
+  if (origin === 'mcq') return 'MCQ (Moodle)'
+  return 'Assignment'
+}
+
 // ── File chips ──────────────────────────────────────────────────────────────
 
 function FileChips({ files, onRemove }: { files: File[]; onRemove: (i: number) => void }) {
@@ -258,7 +333,7 @@ function RubricTable({
   onChange,
 }: {
   items: RubricItem[]
-  source: 'assignment' | 'teacher_key'
+  source: 'assignment' | 'qa' | 'mcq'
   onChange: (items: RubricItem[]) => void
 }) {
   function update(index: number, patch: Partial<RubricItem>) {
@@ -271,9 +346,19 @@ function RubricTable({
 
   function addItem() {
     const base: RubricItem =
-      source === 'teacher_key'
-        ? { item_origin: 'teacher_key', name: '', description: '', expected_answer: '', points: 5, mode: 'exact', grounding: '' }
-        : { item_origin: 'assignment', name: '', description: '', points: 5, grounding: 'ai' }
+      source === 'assignment'
+        ? { item_origin: 'assignment', name: '', description: '', points: 5, grounding: 'ai' }
+        : source === 'qa'
+          ? {
+              item_origin: 'teacher_key',
+              name: '',
+              description: '',
+              expected_answer: '',
+              points: 5,
+              mode: 'conceptual',
+              grounding: 'ai',
+            }
+          : { item_origin: 'teacher_key', name: '', description: '', expected_answer: '', points: 5, mode: 'exact', grounding: '' }
     onChange([...items, base])
   }
 
@@ -292,8 +377,8 @@ function RubricTable({
   return (
     <div>
       {items.map((item, index) => {
-        const isExact = item.mode === 'exact'
-        const showGrounding = source === 'assignment' || !isExact
+        const isExact = source === 'qa' ? false : item.mode === 'exact'
+        const showGrounding = source === 'assignment' || source === 'qa'
         return (
           <div
             key={index}
@@ -332,25 +417,6 @@ function RubricTable({
                   style={{ width: '100%' }}
                 />
               </div>
-              {/* Type (teacher_key only) */}
-              {source === 'teacher_key' && (
-                <div style={{ flex: '0 0 140px' }}>
-                  <label style={{ fontSize: '0.76rem', color: 'var(--ink-soft)', display: 'block', marginBottom: 2 }}>
-                    Type
-                  </label>
-                  <select
-                    value={item.mode || 'exact'}
-                    onChange={(e) => {
-                      const mode = e.target.value as 'exact' | 'conceptual'
-                      update(index, { mode, grounding: mode === 'exact' ? '' : (item.grounding || 'ai') })
-                    }}
-                    style={{ width: '100%' }}
-                  >
-                    <option value="exact">MCQ / Exact</option>
-                    <option value="conceptual">QA / Conceptual</option>
-                  </select>
-                </div>
-              )}
               {/* Grounding */}
               {showGrounding && (
                 <div style={{ flex: '0 0 130px' }}>
@@ -403,18 +469,28 @@ function RubricTable({
               />
             </div>
 
-            {/* Expected answer (teacher_key only) */}
-            {source === 'teacher_key' && (
+            {/* Expected answer (QA + MCQ) */}
+            {(source === 'qa' || source === 'mcq') && (
               <div>
                 <label style={{ fontSize: '0.76rem', color: 'var(--ink-soft)', display: 'block', marginBottom: 2 }}>
-                  {isExact ? 'Correct answer (e.g. "A", "B", "True")' : 'Model answer / key ideas to cover'}
+                  {source === 'qa' ? 'Model answer / key ideas' : isExact ? 'Correct answer (e.g. "A", "B", "True")' : 'Model answer / key ideas to cover'}
                 </label>
-                <input
-                  value={item.expected_answer || ''}
-                  onChange={(e) => update(index, { expected_answer: e.target.value })}
-                  placeholder={isExact ? 'A' : 'Key concepts the student should address…'}
-                  style={{ width: '100%' }}
-                />
+                {source === 'qa' ? (
+                  <textarea
+                    rows={3}
+                    value={item.expected_answer || ''}
+                    onChange={(e) => update(index, { expected_answer: e.target.value })}
+                    placeholder="What a strong student response should include…"
+                    style={{ width: '100%', resize: 'vertical' }}
+                  />
+                ) : (
+                  <input
+                    value={item.expected_answer || ''}
+                    onChange={(e) => update(index, { expected_answer: e.target.value })}
+                    placeholder={isExact ? 'A' : 'Key concepts the student should address…'}
+                    style={{ width: '100%' }}
+                  />
+                )}
               </div>
             )}
           </div>
@@ -744,8 +820,7 @@ function SourcePanel({
   setManualText,
   docs,
   docsLoading,
-  onUpload,
-  onDirectParse,
+  onAddFiles,
   onRefresh,
   onDelete,
 }: {
@@ -757,8 +832,7 @@ function SourcePanel({
   setManualText: (v: string) => void
   docs: DocRow[]
   docsLoading: boolean
-  onUpload: (files: FileList | null) => void
-  onDirectParse: (files: FileList | null) => void
+  onAddFiles: (files: FileList | null) => void
   onRefresh: () => void
   onDelete: (doc: DocRow) => void
 }) {
@@ -769,27 +843,18 @@ function SourcePanel({
       <h2 style={{ margin: '0 0 0.5rem', fontSize: '1.08rem' }}>{title}</h2>
       <p style={{ margin: '0 0 1rem', color: 'var(--ink-soft)', fontSize: '0.92rem' }}>{subtitle}</p>
 
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem' }}>
-        <div className="field">
-          <label htmlFor={`${panelId}-upload`}>Upload to library</label>
-          <input
-            id={`${panelId}-upload`}
-            type="file"
-            multiple
-            accept={LIBRARY_ACCEPT}
-            onChange={(e) => onUpload(e.target.files)}
-          />
-        </div>
-        <div className="field">
-          <label htmlFor={`${panelId}-direct`}>Use directly (no library save)</label>
-          <input
-            id={`${panelId}-direct`}
-            type="file"
-            multiple
-            accept={PARSE_ACCEPT}
-            onChange={(e) => onDirectParse(e.target.files)}
-          />
-        </div>
+      <div className="field">
+        <label htmlFor={`${panelId}-add`}>Add files</label>
+        <p style={{ margin: '0.25rem 0 0.5rem', color: 'var(--ink-soft)', fontSize: '0.82rem' }}>
+          PDF, Word, PowerPoint, text, and JSON are <strong>saved to your library</strong> for the system RAG retriever (duplicate uploads with identical content reuse the existing file). Other types are parsed into the text area only.
+        </p>
+        <input
+          id={`${panelId}-add`}
+          type="file"
+          multiple
+          accept={PARSE_ACCEPT}
+          onChange={(e) => onAddFiles(e.target.files)}
+        />
       </div>
 
       <div className="field">
@@ -825,7 +890,7 @@ function SourcePanel({
 
 export function GradePage() {
   const location = useLocation()
-  const [tab, setTab] = useState<'assignment' | 'teacher' | 'presets' | 'grade' | 'history'>('assignment')
+  const [tab, setTab] = useState<'assignment' | 'mcq' | 'qa' | 'presets' | 'grade' | 'history'>('assignment')
 
   const [docs, setDocs] = useState<DocRow[]>([])
   const [docsLoading, setDocsLoading] = useState(false)
@@ -837,16 +902,26 @@ export function GradePage() {
   const [assignmentItemsJson, setAssignmentItemsJson] = useState('[]')
   const [assignmentShowJson, setAssignmentShowJson] = useState(false)
 
-  // Teacher key rubric
-  const [teacherKeyText, setTeacherKeyText] = useState('')
-  const [teacherKeyDocIds, setTeacherKeyDocIds] = useState<string[]>([])
-  const [teacherItems, setTeacherItems] = useState<RubricItem[]>([])
-  const [teacherItemsJson, setTeacherItemsJson] = useState('[]')
-  const [teacherShowJson, setTeacherShowJson] = useState(false)
+  // QA rubric (open questions; teacher paste / docs — not Moodle MCQ)
+  const [qaTeacherText, setQaTeacherText] = useState('')
+  const [qaTeacherDocIds, setQaTeacherDocIds] = useState<string[]>([])
+  const [qaItems, setQaItems] = useState<RubricItem[]>([])
+  const [qaItemsJson, setQaItemsJson] = useState('[]')
+  const [qaShowJson, setQaShowJson] = useState(false)
+  const [qaDefaultGrounding, setQaDefaultGrounding] = useState<'ai' | 'reference' | 'hybrid'>('ai')
+
+  // MCQ (Moodle XML key + deterministic compare)
+  const [mcqItems, setMcqItems] = useState<RubricItem[]>([])
+  const [mcqItemsJson, setMcqItemsJson] = useState('[]')
+  const [mcqShowJson, setMcqShowJson] = useState(false)
+  const [mcqKeyXml, setMcqKeyXml] = useState('')
+  const [mcqStudentXml, setMcqStudentXml] = useState('')
+  const [mcqBatchStudentXmls, setMcqBatchStudentXmls] = useState<Array<{ title: string; xml: string }>>([])
+  const mcqBatchInputRef = useRef<HTMLInputElement>(null)
 
   const [totalPoints, setTotalPoints] = useState(100)
-  const [gradeSource, setGradeSource] = useState<'assignment' | 'teacher_key'>('assignment')
-  const [presetSource, setPresetSource] = useState<'assignment' | 'teacher_key'>('assignment')
+  const [gradeSource, setGradeSource] = useState<'assignment' | 'mcq' | 'qa'>('assignment')
+  const [presetSource, setPresetSource] = useState<'assignment' | 'qa' | 'mcq'>('assignment')
   const [presetName, setPresetName] = useState('')
   const [selectedPreset, setSelectedPreset] = useState('')
   const [presets, setPresets] = useState<Record<string, EvaluationPreset>>({})
@@ -883,8 +958,11 @@ export function GradePage() {
   const [savingReview, setSavingReview] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [message, setMessage] = useState<string | null>(null)
+  /** Live status while grading (batch uses server progress + ETA; single uses elapsed timer). */
+  const [gradeProgressLine, setGradeProgressLine] = useState<string | null>(null)
 
-  const activeItems = gradeSource === 'teacher_key' ? teacherItems : assignmentItems
+  const activeItems =
+    gradeSource === 'mcq' ? mcqItems : gradeSource === 'qa' ? qaItems : assignmentItems
   const activeItemsNeedReference = rubricNeedsReference(activeItems)
   const hasReferenceMaterial = referenceDocIds.length > 0 || referenceText.trim().length > 0
   const selectedBatchRecord = batchResults[selectedBatchIndex] || null
@@ -906,9 +984,18 @@ export function GradePage() {
     setAssignmentItems(items)
     setAssignmentItemsJson(prettyJson(items))
   }
-  function setTeacherItemsWithSync(items: RubricItem[]) {
-    setTeacherItems(items)
-    setTeacherItemsJson(prettyJson(items))
+  function setQaItemsWithSync(items: RubricItem[]) {
+    const fixed = items.map((it) => {
+      const g = String(it.grounding || '').trim().toLowerCase()
+      const grounding = g === 'ai' || g === 'reference' || g === 'hybrid' ? g : 'ai'
+      return { ...it, mode: 'conceptual', grounding }
+    })
+    setQaItems(fixed)
+    setQaItemsJson(prettyJson(fixed))
+  }
+  function setMcqItemsWithSync(items: RubricItem[]) {
+    setMcqItems(items)
+    setMcqItemsJson(prettyJson(items))
   }
 
   useEffect(() => { void bootstrap() }, [])
@@ -930,15 +1017,18 @@ export function GradePage() {
       importMessage?: string
     } | null
     if (!state?.rubric?.length) return
-    if (state.origin === 'teacher_key') {
-      setTeacherItemsWithSync(state.rubric)
-      setGradeSource('teacher_key')
+    if (state.origin === 'teacher_key' || state.origin === 'qa') {
+      setQaItemsWithSync(state.rubric)
+      setGradeSource('qa')
+    } else if (state.origin === 'mcq') {
+      setMcqItemsWithSync(state.rubric)
+      setGradeSource('mcq')
     } else {
       setAssignmentItemsWithSync(state.rubric)
       setGradeSource('assignment')
     }
     if (typeof state.teacher_key_text === 'string' && state.teacher_key_text.trim()) {
-      setTeacherKeyText(state.teacher_key_text)
+      setQaTeacherText(state.teacher_key_text)
     }
     const stp = state.suggested_total_points
     if (typeof stp === 'number' && Number.isFinite(stp)) {
@@ -972,7 +1062,7 @@ export function GradePage() {
       // Deselect from all pickers if it was selected
       const id = doc.document_id
       setAssignmentDocIds((prev) => prev.filter((x) => x !== id))
-      setTeacherKeyDocIds((prev) => prev.filter((x) => x !== id))
+      setQaTeacherDocIds((prev) => prev.filter((x) => x !== id))
       setReferenceDocIds((prev) => prev.filter((x) => x !== id))
       setSingleSubmissionDocIds((prev) => prev.filter((x) => x !== id))
       await refreshDocs()
@@ -1045,65 +1135,229 @@ export function GradePage() {
     }
   }
 
-  async function uploadToLibrary(files: FileList | null, setSelectedIds?: (ids: string[]) => void) {
-    if (!files?.length) return
-    setError(null); setMessage(null)
-    const previousIds = new Set(docs.map((d) => d.document_id))
-    try {
-      await apiUpload('/documents/upload', files)
-      const docsRes = await apiJson<DocRow[]>('/documents/local')
-      setDocs(docsRes)
-      const added = docsRes.filter((d) => !previousIds.has(d.document_id)).map((d) => d.document_id)
-      if (added.length > 0 && setSelectedIds) {
-        setSelectedIds(added)
-        setMessage('File(s) uploaded and selected.')
-      } else {
-        setMessage('Files uploaded to library.')
-      }
-    } catch (e) {
-      setError(e instanceof Error ? e.message : 'Failed to upload files.')
-    }
-  }
-
-  async function parseSourceUpload(
+  async function ingestGradingSource(
     files: FileList | null,
-    currentText: string,
-    setText: (v: string) => void,
-    label: string
+    opts: {
+      mergeDocIds: (ids: string[]) => void
+      currentText: string
+      setText: (v: string) => void
+      label: string
+    },
   ) {
     if (!files?.length) return
+    const list = Array.from(files)
     setLoading(true); setError(null); setMessage(null)
     try {
-      const formData = new FormData()
-      Array.from(files).forEach((f) => formData.append('files', f))
-      const res = await apiFormJson<ParsedUploadListResponse>('/evaluation/uploads/parse', formData)
-      if (!res.items.length) throw new Error('No supported files could be parsed.')
-      const appended = res.items.map((item) => `=== FILE: ${item.name} ===\n${item.text}`).join('\n\n')
-      setText([currentText.trim(), appended].filter(Boolean).join('\n\n'))
-      setMessage(`Loaded ${res.items.length} ${label} file(s).`)
+      const kbList = list.filter(isKbLibraryFile)
+      let uploadRows: DocumentUploadRow[] = []
+      if (kbList.length) {
+        uploadRows = (await apiUpload('/documents/upload', kbList)) as DocumentUploadRow[]
+        const docsRes = await apiJson<DocRow[]>('/documents/local')
+        setDocs(docsRes)
+        const matched = resolveDocIdsFromUploadRows(docsRes, uploadRows)
+        if (matched.length) opts.mergeDocIds(matched)
+      }
+
+      let parsedCount = 0
+      let parseNote = ''
+      try {
+        const formData = new FormData()
+        list.forEach((f) => formData.append('files', f))
+        const res = await apiFormJson<ParsedUploadListResponse>('/evaluation/uploads/parse', formData)
+        if (res.items?.length) {
+          parsedCount = res.items.length
+          const appended = res.items.map((item) => `=== FILE: ${item.name} ===\n${item.text}`).join('\n\n')
+          opts.setText([opts.currentText.trim(), appended].filter(Boolean).join('\n\n'))
+        }
+      } catch (pe) {
+        if (!kbList.length) throw pe
+        parseNote = `Text extract failed (${pe instanceof Error ? pe.message : 'error'}); you can paste manually.`
+      }
+
+      const reused = uploadRows.some((r) => r.reused_existing)
+      const parts: string[] = []
+      if (kbList.length && uploadRows.length) {
+        parts.push(
+          reused
+            ? 'Library: identical file(s) already indexed — reused for RAG (no duplicate saved).'
+            : 'Library: file(s) saved for RAG and selected below.',
+        )
+      }
+      if (parsedCount) parts.push(`Text: added extract from ${parsedCount} file(s).`)
+      if (list.length > kbList.length) {
+        parts.push(`${list.length - kbList.length} file(s) were only parsed (extension not stored in library).`)
+      }
+      if (parseNote) parts.push(parseNote)
+      if (parts.length) setMessage(parts.join(' '))
     } catch (e) {
-      setError(e instanceof Error ? e.message : `Failed to parse ${label} file.`)
+      setError(e instanceof Error ? e.message : 'Failed to add files.')
     } finally {
       setLoading(false)
     }
   }
 
-  async function parseSingleSubmissionFile(files: FileList | null) {
+  async function ingestSingleSubmissionFile(files: FileList | null) {
     if (!files?.length) return
+    const f = files[0]
     setLoading(true); setError(null); setMessage(null)
     try {
+      let reused = false
+      if (isKbLibraryFile(f)) {
+        const uploadRows = (await apiUpload('/documents/upload', [f])) as DocumentUploadRow[]
+        const docsRes = await apiJson<DocRow[]>('/documents/local')
+        setDocs(docsRes)
+        const matched = resolveDocIdsFromUploadRows(docsRes, uploadRows)
+        setSingleSubmissionDocIds(matched)
+        reused = uploadRows.some((r) => r.reused_existing)
+      } else {
+        setSingleSubmissionDocIds([])
+      }
+
       const formData = new FormData()
-      formData.append('files', files[0])
+      formData.append('files', f)
       const res = await apiFormJson<ParsedUploadListResponse>('/evaluation/uploads/parse', formData)
       const parsed = res.items[0]
       if (!parsed) throw new Error('File could not be parsed.')
       setSingleSubmissionText(parsed.text)
-      setSingleSubmissionDocIds([])
       setSingleTitle(parsed.name)
-      setMessage(`Loaded submission from ${parsed.name}.`)
+
+      const libMsg = !isKbLibraryFile(f) ? '' : reused ? 'Matched existing library file (RAG). ' : 'Saved to library for RAG. '
+      setMessage(`${libMsg}Loaded text from ${parsed.name}.`)
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'Failed to parse submission file.')
+      setError(e instanceof Error ? e.message : 'Failed to load submission file.')
     } finally {
+      setLoading(false)
+    }
+  }
+
+  async function loadTextFromXmlFile(files: FileList | null, setField: (v: string) => void, role: string) {
+    if (!files?.length) return
+    const f = files[0]
+    if (!f.name.toLowerCase().endsWith('.xml')) {
+      setError('Moodle MCQ requires a UTF-8 text file ending in .xml (Moodle quiz export).')
+      return
+    }
+    setLoading(true); setError(null); setMessage(null)
+    try {
+      const text = await f.text()
+      setField(text)
+      setMessage(`Loaded ${role}: ${f.name}`)
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Could not read the XML file.')
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  async function loadMcqRubricFromKeyXml() {
+    const raw = mcqKeyXml.trim()
+    if (!raw) {
+      setError('Paste the Moodle answer-key XML or upload a .xml file first.')
+      return
+    }
+    setLoading(true); setError(null); setMessage(null)
+    try {
+      const res = await apiJson<RubricGenerationResponse>('/evaluation/rubric/from-moodle-xml', {
+        method: 'POST',
+        body: JSON.stringify({ xml: raw }),
+      })
+      const items = res.items || []
+      setMcqItemsWithSync(items)
+      setGradeSource('mcq')
+      const sum = rubricTotal(items)
+      if (sum >= 1 && sum <= 2000) setTotalPoints(Math.round(sum))
+      setMessage((res.summary && res.summary.join(' ')) || `Loaded ${items.length} MCQ item(s) from Moodle XML.`)
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Could not parse Moodle XML key.')
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  async function addMcqBatchStudentXmlFiles(files: FileList | null) {
+    if (!files?.length) return
+    setError(null); setMessage(null)
+    const list = Array.from(files).filter((f) => f.name.toLowerCase().endsWith('.xml'))
+    if (list.length === 0) {
+      setError('Add one or more files ending in .xml (Moodle quiz exports).')
+      return
+    }
+    setLoading(true)
+    try {
+      const incoming: Array<{ title: string; xml: string }> = []
+      for (const f of list) {
+        const base = f.name.replace(/\.xml$/i, '') || 'Submission'
+        incoming.push({ title: base, xml: await f.text() })
+      }
+      setMcqBatchStudentXmls((prev) => {
+        const used = new Set(prev.map((p) => p.title))
+        const merged = [...prev]
+        for (const row of incoming) {
+          let title = row.title
+          let n = 2
+          while (used.has(title)) {
+            title = `${row.title} (${n})`
+            n += 1
+          }
+          used.add(title)
+          merged.push({ title, xml: row.xml })
+        }
+        return merged
+      })
+      setMessage(`Queued ${incoming.length} Moodle attempt file(s) for batch MCQ.`)
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Could not read XML file(s).')
+    } finally {
+      setLoading(false)
+      if (mcqBatchInputRef.current) mcqBatchInputRef.current.value = ''
+    }
+  }
+
+  function removeMcqBatchStudent(index: number) {
+    setMcqBatchStudentXmls((prev) => prev.filter((_, i) => i !== index))
+  }
+
+  async function gradeBatchMcq() {
+    if (!mcqKeyXml.trim()) {
+      setError('Load the answer key on the MCQ tab (paste or upload key XML) first.')
+      return
+    }
+    if (mcqBatchStudentXmls.length === 0) {
+      setError('Add at least one student Moodle .xml file to the batch queue.')
+      return
+    }
+    setLoading(true); setError(null); setMessage(null); setBatchResults([]); setSelectedBatchIndex(0); setGradeResult(null)
+    const nAttempts = mcqBatchStudentXmls.length
+    const t0 = Date.now()
+    const tick = window.setInterval(() => {
+      setGradeProgressLine(
+        `Grading ${nAttempts} Moodle attempt(s) · ${formatDurationSeconds((Date.now() - t0) / 1000)} elapsed`,
+      )
+    }, 500)
+    try {
+      const res = await apiJson<BatchGradeResponse>('/evaluation/grade/moodle-mcq/batch', {
+        method: 'POST',
+        body: JSON.stringify({
+          key_xml: mcqKeyXml,
+          submissions: mcqBatchStudentXmls.map((s) => ({ title: s.title, student_xml: s.xml })),
+          batch_name: batchName.trim(),
+          save_history: saveHistory,
+        }),
+      })
+      const records = res.records || []
+      setBatchResults(records)
+      setSelectedBatchIndex(0)
+      let histNote = ''
+      if (saveHistory) {
+        const okHist = await refreshHistory(undefined, { quiet: true })
+        if (!okHist) histNote = ' History could not refresh — open the History tab and press Refresh.'
+      }
+      setMessage(`Moodle MCQ batch done: ${records.length} attempt(s)${res.batch_name ? ` in "${res.batch_name}"` : ''}.${histNote}`)
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Failed to grade Moodle MCQ batch.')
+    } finally {
+      window.clearInterval(tick)
+      setGradeProgressLine(null)
       setLoading(false)
     }
   }
@@ -1144,29 +1398,85 @@ export function GradePage() {
     }
   }
 
-  async function generateTeacherRubric() {
+  async function generateQaRubric() {
     setLoading(true); setError(null); setMessage(null)
     try {
       for await (const event of apiStream<RubricStreamEvent>('/evaluation/rubric/from-teacher-key/stream', {
         method: 'POST',
-        body: JSON.stringify({ text: teacherKeyText, document_ids: teacherKeyDocIds, total_points: totalPoints }),
+        body: JSON.stringify({
+          text: qaTeacherText,
+          document_ids: qaTeacherDocIds,
+          total_points: totalPoints,
+          default_grounding: qaDefaultGrounding,
+        }),
       })) {
         if (event.error) throw new Error(event.error)
         if (event.message) setMessage(event.message)
         if (event.done) {
-          setTeacherItemsWithSync(event.items || [])
-          setGradeSource('teacher_key')
-          setMessage('Teacher-key rubric generated. Review items below then go to Grade.')
+          setQaItemsWithSync(event.items || [])
+          setGradeSource('qa')
+          setMessage('QA rubric generated. Review items below, then use the Grade tab.')
         }
       }
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'Failed to generate teacher-key rubric.')
+      setError(e instanceof Error ? e.message : 'Failed to generate QA rubric.')
     } finally {
       setLoading(false)
     }
   }
 
   async function gradeSingleSubmission() {
+    if (gradeSource === 'mcq') {
+      if (!mcqKeyXml.trim() || !mcqStudentXml.trim()) {
+        setError('For MCQ, provide Moodle XML for both the answer key and the student attempt (paste or upload .xml).')
+        return
+      }
+      setLoading(true); setError(null); setMessage(null); setGradeResult(null)
+      const t0 = Date.now()
+      const tick = window.setInterval(() => {
+        setGradeProgressLine(`Grading Moodle MCQ · ${formatDurationSeconds((Date.now() - t0) / 1000)} elapsed`)
+      }, 500)
+      try {
+        const res = await apiJson<GradeResponse>('/evaluation/grade/moodle-mcq', {
+          method: 'POST',
+          body: JSON.stringify({
+            key_xml: mcqKeyXml,
+            student_xml: mcqStudentXml,
+            result_title: singleTitle || 'Moodle MCQ',
+            save_history: saveHistory,
+          }),
+        })
+        const record = res.record ?? null
+        setGradeResult(record)
+        if (!record) {
+          setError(
+            'The API returned no grading record. Check POST /evaluation/grade/moodle-mcq in the Network tab and confirm the backend is running.',
+          )
+          return
+        }
+        if (saveHistory) {
+          const okHist = await refreshHistory(undefined, { quiet: true })
+          setMessage(
+            okHist
+              ? 'MCQ graded (deterministic from Moodle XML).'
+              : 'MCQ graded. History could not refresh — open the History tab and press Refresh.',
+          )
+        } else {
+          setMessage('MCQ graded (deterministic from Moodle XML).')
+        }
+        requestAnimationFrame(() => {
+          document.getElementById('grade-result-anchor')?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+        })
+      } catch (e) {
+        setError(e instanceof Error ? e.message : 'Failed to grade Moodle MCQ.')
+      } finally {
+        window.clearInterval(tick)
+        setGradeProgressLine(null)
+        setLoading(false)
+      }
+      return
+    }
+
     if (!activeItems.length) { setError('Generate or load a rubric first.'); return }
     if (activeItemsNeedReference && !hasReferenceMaterial) {
       setError('Please upload, select, or paste reference material before grading because one or more criteria use reference or hybrid grounding.')
@@ -1179,25 +1489,25 @@ export function GradePage() {
       return
     }
     setLoading(true); setError(null); setMessage(null); setGradeResult(null)
+    const t0Open = Date.now()
+    const tickOpen = window.setInterval(() => {
+      setGradeProgressLine(`Grading with AI · ${formatDurationSeconds((Date.now() - t0Open) / 1000)} elapsed`)
+    }, 500)
     try {
-      const res = await apiJson<GradeResponse>(
-        '/evaluation/grade',
-        {
-          method: 'POST',
-          body: JSON.stringify({
-            submission_text: singleSubmissionText,
-            submission_document_ids: singleSubmissionDocIds,
-            items: activeItems,
-            teacher_key_text: teacherKeyText,
-            teacher_key_document_ids: teacherKeyDocIds,
-            reference_text: referenceText,
-            reference_document_ids: referenceDocIds,
-            result_title: singleTitle || 'Web submission',
-            save_history: saveHistory,
-          }),
-        },
-        180_000
-      )
+      const res = await apiJson<GradeResponse>('/evaluation/grade', {
+        method: 'POST',
+        body: JSON.stringify({
+          submission_text: singleSubmissionText,
+          submission_document_ids: singleSubmissionDocIds,
+          items: activeItems,
+          teacher_key_text: gradeSource === 'qa' ? qaTeacherText : '',
+          teacher_key_document_ids: gradeSource === 'qa' ? qaTeacherDocIds : [],
+          reference_text: referenceText,
+          reference_document_ids: referenceDocIds,
+          result_title: singleTitle || 'Web submission',
+          save_history: saveHistory,
+        }),
+      })
       const record = res.record ?? null
       setGradeResult(record)
       if (!record) {
@@ -1222,6 +1532,8 @@ export function GradePage() {
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Failed to grade submission.')
     } finally {
+      window.clearInterval(tickOpen)
+      setGradeProgressLine(null)
       setLoading(false)
     }
   }
@@ -1234,6 +1546,11 @@ export function GradePage() {
       return
     }
     setLoading(true); setError(null); setMessage(null); setBatchResults([]); setSelectedBatchIndex(0)
+    let prepTick: ReturnType<typeof window.setInterval> | null = null
+    const prepStarted = Date.now()
+    prepTick = window.setInterval(() => {
+      setGradeProgressLine(`Reading submission files · ${formatDurationSeconds((Date.now() - prepStarted) / 1000)} elapsed`)
+    }, 400)
     try {
       const formData = new FormData()
       batchFiles.forEach((f) => formData.append('files', f))
@@ -1243,23 +1560,25 @@ export function GradePage() {
         .filter((s) => s.submission_text.trim())
       if (submissions.length === 0) throw new Error('None of the selected files produced usable text.')
 
-      const res = await apiJson<BatchGradeResponse>(
-        '/evaluation/grade/batch',
-        {
-          method: 'POST',
-          body: JSON.stringify({
-            submissions,
-            items: activeItems,
-            teacher_key_text: teacherKeyText,
-            teacher_key_document_ids: teacherKeyDocIds,
-            reference_text: referenceText,
-            reference_document_ids: referenceDocIds,
-            batch_name: batchName.trim(),
-            save_history: saveHistory,
-          }),
-        },
-        180_000
-      )
+      if (prepTick) {
+        window.clearInterval(prepTick)
+        prepTick = null
+      }
+      setGradeProgressLine(`Grading ${submissions.length} submission(s) with AI…`)
+
+      const streamBody = {
+        submissions,
+        items: activeItems,
+        teacher_key_text: gradeSource === 'qa' ? qaTeacherText : '',
+        teacher_key_document_ids: gradeSource === 'qa' ? qaTeacherDocIds : [],
+        reference_text: referenceText,
+        reference_document_ids: referenceDocIds,
+        batch_name: batchName.trim(),
+        save_history: saveHistory,
+      }
+      const res = (await apiPostEvaluationBatchGradeStream(streamBody, (p) => {
+        setGradeProgressLine(formatBatchGradeProgressLine(p))
+      })) as BatchGradeResponse
       const records = res.records || []
       setBatchResults(records)
       setSelectedBatchIndex(0)
@@ -1272,16 +1591,20 @@ export function GradePage() {
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Failed to grade batch submissions.')
     } finally {
+      if (prepTick) window.clearInterval(prepTick)
+      setGradeProgressLine(null)
       setLoading(false)
     }
   }
 
-  function applyJsonEdits(source: 'assignment' | 'teacher_key') {
+  function applyJsonEdits(source: 'assignment' | 'qa' | 'mcq') {
     try {
-      const raw = source === 'assignment' ? assignmentItemsJson : teacherItemsJson
+      const raw =
+        source === 'assignment' ? assignmentItemsJson : source === 'qa' ? qaItemsJson : mcqItemsJson
       const parsed = parseRubricItems(raw)
-      if (source === 'assignment') setAssignmentItems(parsed)
-      else setTeacherItems(parsed)
+      if (source === 'assignment') setAssignmentItemsWithSync(parsed)
+      else if (source === 'qa') setQaItemsWithSync(parsed)
+      else setMcqItemsWithSync(parsed)
       setMessage('JSON applied.')
       setError(null)
     } catch (e) {
@@ -1290,7 +1613,8 @@ export function GradePage() {
   }
 
   async function savePreset() {
-    const items = presetSource === 'teacher_key' ? teacherItems : assignmentItems
+    const items =
+      presetSource === 'assignment' ? assignmentItems : presetSource === 'qa' ? qaItems : mcqItems
     if (!presetName.trim()) { setError('Enter a preset name.'); return }
     if (!items.length) { setError('Generate a rubric first.'); return }
     setLoading(true); setError(null); setMessage(null)
@@ -1312,9 +1636,13 @@ export function GradePage() {
   function loadPreset(name: string) {
     const preset = presets[name]
     if (!preset) return
-    if ((preset.origin || 'assignment') === 'teacher_key') {
-      setTeacherItemsWithSync(preset.items || [])
-      setGradeSource('teacher_key')
+    const o = preset.origin || 'assignment'
+    if (o === 'teacher_key' || o === 'qa') {
+      setQaItemsWithSync(preset.items || [])
+      setGradeSource('qa')
+    } else if (o === 'mcq') {
+      setMcqItemsWithSync(preset.items || [])
+      setGradeSource('mcq')
     } else {
       setAssignmentItemsWithSync(preset.items || [])
       setGradeSource('assignment')
@@ -1465,10 +1793,10 @@ export function GradePage() {
     }
   }
 
-  // ── Rubric panel (shared for assignment and teacher_key) ──────────────────
+  // ── Rubric panel (assignment / QA / MCQ) ─────────────────────────────────
 
   function renderRubricPanel(
-    source: 'assignment' | 'teacher_key',
+    source: 'assignment' | 'qa' | 'mcq',
     items: RubricItem[],
     setItems: (items: RubricItem[]) => void,
     json: string,
@@ -1476,7 +1804,7 @@ export function GradePage() {
     showJson: boolean,
     setShowJson: (v: boolean) => void
   ) {
-    const label = source === 'teacher_key' ? 'Teacher-key' : 'Assignment'
+    const label = source === 'assignment' ? 'Assignment' : source === 'qa' ? 'QA' : 'MCQ (Moodle XML)'
     return (
       <div className="panel" style={{ marginTop: '1rem' }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', gap: '1rem', flexWrap: 'wrap', marginBottom: '0.85rem' }}>
@@ -1533,7 +1861,7 @@ export function GradePage() {
     <>
       <h1 className="page-title">Flexible Grader</h1>
       <p className="page-sub">
-        Upload a teacher key or assignment to generate a rubric, then grade student submissions — single or batch.
+        Build rubrics from an assignment, from QA model answers, or from a Moodle XML MCQ key. Grade open responses with AI, reference, or hybrid grounding; grade Moodle MCQ one attempt or many <code>.xml</code> files in a batch, with partial credit when a question has multiple correct options.
       </p>
 
       {error && (
@@ -1542,9 +1870,23 @@ export function GradePage() {
         </div>
       )}
       {message && <div className="success">{message}</div>}
+      {gradeProgressLine && (
+        <p
+          role="status"
+          aria-live="polite"
+          style={{
+            margin: '0.35rem 0 0',
+            fontSize: '0.9rem',
+            color: 'var(--ink-soft)',
+            lineHeight: 1.45,
+          }}
+        >
+          {gradeProgressLine}
+        </p>
+      )}
 
       <div className="tabs">
-        {(['assignment', 'teacher', 'presets', 'grade', 'history'] as const).map((t) => (
+        {(['assignment', 'mcq', 'qa', 'presets', 'grade', 'history'] as const).map((t) => (
           <button
             key={t}
             type="button"
@@ -1552,7 +1894,8 @@ export function GradePage() {
             onClick={() => setTab(t)}
           >
             {t === 'assignment' ? 'Assignment rubric' :
-              t === 'teacher' ? 'Teacher key' :
+              t === 'mcq' ? 'MCQ (Moodle)' :
+              t === 'qa' ? 'QA rubric' :
               t === 'presets' ? 'Presets' :
               t === 'grade' ? 'Grade' : 'History'}
           </button>
@@ -1564,15 +1907,21 @@ export function GradePage() {
         <>
           <SourcePanel
             title="Assignment source"
-            subtitle="Upload or paste your assignment. The AI will create a rubric from it."
+            subtitle="Add files (saved to your library for RAG when supported) and/or paste assignment text. The AI builds a rubric from the combined source."
             selectedIds={assignmentDocIds}
             setSelectedIds={setAssignmentDocIds}
             manualText={assignmentText}
             setManualText={setAssignmentText}
             docs={docs}
             docsLoading={docsLoading}
-            onUpload={(f) => void uploadToLibrary(f, setAssignmentDocIds)}
-            onDirectParse={(f) => void parseSourceUpload(f, assignmentText, setAssignmentText, 'assignment')}
+            onAddFiles={(f) =>
+              void ingestGradingSource(f, {
+                mergeDocIds: (ids) => setAssignmentDocIds((prev) => Array.from(new Set([...prev, ...ids]))),
+                currentText: assignmentText,
+                setText: setAssignmentText,
+                label: 'Assignment source',
+              })
+            }
             onRefresh={() => void refreshDocs()}
             onDelete={(doc) => void deleteDoc(doc)}
           />
@@ -1604,37 +1953,105 @@ export function GradePage() {
         </>
       )}
 
-      {/* ── Teacher key tab ── */}
-      {tab === 'teacher' && (
+      {/* ── MCQ tab ── */}
+      {tab === 'mcq' && (
         <>
           <div className="panel" style={{ marginBottom: '1rem', background: 'rgba(30,58,95,0.04)', border: '1px solid rgba(30,58,95,0.12)' }}>
             <p style={{ margin: 0, fontSize: '0.92rem', color: 'var(--ink-soft)' }}>
-              <strong style={{ color: 'var(--ink)' }}>How it works:</strong> Upload your teacher key (MCQ answer sheet, QA model answers, etc.).
-              The AI extracts each question, its correct answer, and point value, then creates rubric items automatically.
-              MCQ questions get <strong>exact</strong> mode (deterministic matching), QA questions get <strong>conceptual</strong> mode (semantic grading).
+              <strong style={{ color: 'var(--ink)' }}>Moodle <code>&lt;quiz&gt;</code> XML only</strong> for the key and for each attempt. Scoring is deterministic (no LLM). On the <strong>Grade</strong> tab you can grade one attempt or batch-upload many <code>.xml</code> files.
+              <br />
+              <strong style={{ color: 'var(--ink)' }}>Multi-answer questions:</strong> if the key marks <em>n</em> correct options, each is worth <em>1/n</em> of the question points. The learner&apos;s net units = (correct choices − wrong choices), clamped to <em>[0, n]</em>, then scaled — one wrong selection removes one correct unit.
+            </p>
+          </div>
+
+          <div className="panel" style={{ marginBottom: '1rem' }}>
+            <h2 style={{ margin: '0 0 0.65rem', fontSize: '1.08rem' }}>Answer key (Moodle XML)</h2>
+            <div className="field">
+              <label htmlFor="mcq-key-upload">Upload answer-key XML</label>
+              <input
+                id="mcq-key-upload"
+                type="file"
+                accept={MOODLE_XML_ACCEPT}
+                onChange={(e) => void loadTextFromXmlFile(e.target.files, setMcqKeyXml, 'answer key')}
+              />
+            </div>
+            <div className="field">
+              <label htmlFor="mcq-key-xml">Answer key (Moodle XML)</label>
+              <textarea
+                id="mcq-key-xml"
+                rows={8}
+                value={mcqKeyXml}
+                onChange={(e) => setMcqKeyXml(e.target.value)}
+                placeholder="Paste Moodle quiz export XML for the key…"
+                style={{ fontFamily: 'monospace', fontSize: '0.78rem', width: '100%' }}
+              />
+            </div>
+            <button type="button" className="btn btn--primary" disabled={loading} onClick={() => void loadMcqRubricFromKeyXml()}>
+              {loading ? 'Loading…' : 'Build MCQ rubric from key XML'}
+            </button>
+          </div>
+          {renderRubricPanel(
+            'mcq',
+            mcqItems,
+            setMcqItemsWithSync,
+            mcqItemsJson,
+            (v) => setMcqItemsJson(v),
+            mcqShowJson,
+            setMcqShowJson
+          )}
+        </>
+      )}
+
+      {/* ── QA tab ── */}
+      {tab === 'qa' && (
+        <>
+          <div className="panel" style={{ marginBottom: '1rem', background: 'rgba(30,58,95,0.04)', border: '1px solid rgba(30,58,95,0.12)' }}>
+            <p style={{ margin: 0, fontSize: '0.92rem', color: 'var(--ink-soft)' }}>
+              For <strong style={{ color: 'var(--ink)' }}>open-ended</strong> work: paste or upload model questions/answers (not Moodle MCQ XML). Students submit <strong>plain text</strong> on the Grade tab. Generated rows are always <strong>conceptual</strong> (semantic grading vs. the model answer). Fine-tune each row&apos;s name, description, points, grounding, and model answer after generation.
             </p>
           </div>
 
           <SourcePanel
-            title="Teacher key source"
-            subtitle="Upload or paste your teacher key. Supports any format — MCQ, QA, mixed."
-            selectedIds={teacherKeyDocIds}
-            setSelectedIds={setTeacherKeyDocIds}
-            manualText={teacherKeyText}
-            setManualText={setTeacherKeyText}
+            title="QA — model questions / answers"
+            subtitle="Paste or upload your reference answers. Used to build a rubric for open-text student work."
+            selectedIds={qaTeacherDocIds}
+            setSelectedIds={setQaTeacherDocIds}
+            manualText={qaTeacherText}
+            setManualText={setQaTeacherText}
             docs={docs}
             docsLoading={docsLoading}
-            onUpload={(f) => void uploadToLibrary(f, setTeacherKeyDocIds)}
-            onDirectParse={(f) => void parseSourceUpload(f, teacherKeyText, setTeacherKeyText, 'teacher key')}
+            onAddFiles={(f) =>
+              void ingestGradingSource(f, {
+                mergeDocIds: (ids) => setQaTeacherDocIds((prev) => Array.from(new Set([...prev, ...ids]))),
+                currentText: qaTeacherText,
+                setText: setQaTeacherText,
+                label: 'QA source',
+              })
+            }
             onRefresh={() => void refreshDocs()}
             onDelete={(doc) => void deleteDoc(doc)}
           />
 
           <div className="panel">
             <div className="field">
-              <label htmlFor="teacher-total-points">Total points</label>
+              <label htmlFor="qa-default-grounding">Default grounding for new QA criteria</label>
+              <select
+                id="qa-default-grounding"
+                value={qaDefaultGrounding}
+                onChange={(e) => setQaDefaultGrounding(e.target.value as 'ai' | 'reference' | 'hybrid')}
+              >
+                <option value="ai">AI reasoning</option>
+                <option value="reference">Reference materials only</option>
+                <option value="hybrid">Hybrid (AI + reference)</option>
+              </select>
+              <p style={{ margin: '0.35rem 0 0', color: 'var(--ink-soft)', fontSize: '0.85rem' }}>
+                Applies to conceptual items from generation. Add reference text or library docs on the Grade tab when using reference or hybrid.
+              </p>
+            </div>
+            <div className="field">
+              <label htmlFor="qa-total-points">Total points</label>
               <input
-                id="teacher-total-points"
+                id="qa-total-points"
                 type="number"
                 min={1}
                 max={2000}
@@ -1642,22 +2059,22 @@ export function GradePage() {
                 onChange={(e) => setTotalPoints(Number(e.target.value))}
               />
               <p style={{ margin: '0.35rem 0 0', color: 'var(--ink-soft)', fontSize: '0.85rem' }}>
-                If per-question points are in the teacher key, the AI will use those. Otherwise it distributes evenly.
+                If per-question points appear in your key, the AI will prefer those; otherwise points are spread across items.
               </p>
             </div>
-            <button type="button" className="btn btn--primary" disabled={loading} onClick={() => void generateTeacherRubric()}>
-              {loading ? 'Generating…' : 'Generate teacher-key rubric'}
+            <button type="button" className="btn btn--primary" disabled={loading} onClick={() => void generateQaRubric()}>
+              {loading ? 'Generating…' : 'Generate QA rubric'}
             </button>
           </div>
 
           {renderRubricPanel(
-            'teacher_key',
-            teacherItems,
-            setTeacherItemsWithSync,
-            teacherItemsJson,
-            (v) => setTeacherItemsJson(v),
-            teacherShowJson,
-            setTeacherShowJson
+            'qa',
+            qaItems,
+            setQaItemsWithSync,
+            qaItemsJson,
+            (v) => setQaItemsJson(v),
+            qaShowJson,
+            setQaShowJson
           )}
         </>
       )}
@@ -1672,10 +2089,11 @@ export function GradePage() {
               <select
                 id="grade-source"
                 value={gradeSource}
-                onChange={(e) => setGradeSource(e.target.value as 'assignment' | 'teacher_key')}
+                onChange={(e) => setGradeSource(e.target.value as 'assignment' | 'mcq' | 'qa')}
               >
                 <option value="assignment">Assignment rubric ({assignmentItems.length} items)</option>
-                <option value="teacher_key">Teacher-key rubric ({teacherItems.length} items)</option>
+                <option value="qa">QA rubric ({qaItems.length} items)</option>
+                <option value="mcq">MCQ — Moodle XML ({mcqItems.length} items)</option>
               </select>
             </div>
             <div style={{ display: 'flex', gap: '0.65rem', flexWrap: 'wrap', marginBottom: '0.75rem' }}>
@@ -1702,9 +2120,11 @@ export function GradePage() {
           <div className="panel" style={{ marginBottom: '1rem' }}>
             <h2 style={{ margin: '0 0 0.5rem', fontSize: '1.08rem' }}>Reference material (optional)</h2>
             <p style={{ margin: '0 0 0.85rem', color: 'var(--ink-soft)', fontSize: '0.9rem' }}>
-              Used for rubric items with grounding set to "reference" or "hybrid".
+              {gradeSource === 'mcq'
+                ? 'Not used for Moodle MCQ grading (scores come only from comparing the two XML files).'
+                : 'Used for rubric items with grounding set to "reference" or "hybrid".'}
             </p>
-            {activeItemsNeedReference && !hasReferenceMaterial && (
+            {gradeSource !== 'mcq' && activeItemsNeedReference && !hasReferenceMaterial && (
               <div
                 style={{
                   marginBottom: '0.85rem',
@@ -1721,19 +2141,29 @@ export function GradePage() {
               </div>
             )}
             <div className="field">
-              <label htmlFor="ref-upload">Upload reference directly</label>
+              <label htmlFor="ref-upload">Add reference files</label>
+              <p style={{ margin: '0.25rem 0 0.45rem', color: 'var(--ink-soft)', fontSize: '0.82rem' }}>
+                Supported documents are saved to your library for RAG; identical files are not stored twice. Text extract is appended below when parsing succeeds.
+              </p>
               <input
                 id="ref-upload"
                 type="file"
                 multiple
                 accept={PARSE_ACCEPT}
-                onChange={(e) => void parseSourceUpload(e.target.files, referenceText, setReferenceText, 'reference')}
+                onChange={(e) =>
+                  void ingestGradingSource(e.target.files, {
+                    mergeDocIds: (ids) => setReferenceDocIds((prev) => Array.from(new Set([...prev, ...ids]))),
+                    currentText: referenceText,
+                    setText: setReferenceText,
+                    label: 'Reference',
+                  })
+                }
               />
             </div>
             <div className="field">
-              <label>Or select from library</label>
+              <label>Select from library</label>
               <p style={{ margin: '0.2rem 0 0.45rem', color: 'var(--ink-soft)', fontSize: '0.82rem' }}>
-                Library documents use the system RAG retriever during grading.
+                Library documents are used by the system RAG retriever during grading.
               </p>
               <DocList docs={docs} selectedIds={referenceDocIds} onChange={setReferenceDocIds} onDelete={(doc) => void deleteDoc(doc)} loading={docsLoading} />
             </div>
@@ -1752,48 +2182,81 @@ export function GradePage() {
           {/* Single submission */}
           <div className="panel" style={{ marginBottom: '1rem' }}>
             <h2 style={{ margin: '0 0 0.75rem', fontSize: '1.08rem' }}>Single submission</h2>
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem' }}>
-              <div className="field">
-                <label htmlFor="single-upload">Upload submission file</label>
-                <input
-                  id="single-upload"
-                  type="file"
-                  accept={PARSE_ACCEPT}
-                  onChange={(e) => void parseSingleSubmissionFile(e.target.files)}
-                />
-              </div>
-              <div className="field">
-                <label>Or use library document</label>
-                <DocList docs={docs} selectedIds={singleSubmissionDocIds} onChange={setSingleSubmissionDocIds} onDelete={(doc) => void deleteDoc(doc)} loading={docsLoading} />
-              </div>
-            </div>
+            {gradeSource === 'mcq' ? (
+              <>
+                <p style={{ margin: '0 0 0.85rem', color: 'var(--ink-soft)', fontSize: '0.9rem' }}>
+                  Answer key XML must match what you loaded on the <strong>MCQ (Moodle)</strong> tab ({mcqKeyXml.trim() ? `${mcqKeyXml.length.toLocaleString()} characters in key buffer` : 'key buffer is empty — paste or upload the key there first'}).
+                </p>
+                <div className="field">
+                  <label htmlFor="mcq-student-upload">Upload student attempt (.xml)</label>
+                  <input
+                    id="mcq-student-upload"
+                    type="file"
+                    accept={MOODLE_XML_ACCEPT}
+                    onChange={(e) => void loadTextFromXmlFile(e.target.files, setMcqStudentXml, 'student attempt')}
+                  />
+                </div>
+                <div className="field">
+                  <label htmlFor="mcq-student-xml">Student Moodle XML (single attempt)</label>
+                  <textarea
+                    id="mcq-student-xml"
+                    rows={12}
+                    value={mcqStudentXml}
+                    onChange={(e) => setMcqStudentXml(e.target.value)}
+                    placeholder="Paste one learner’s Moodle quiz XML export…"
+                    style={{ fontFamily: 'monospace', fontSize: '0.78rem', width: '100%' }}
+                  />
+                </div>
+                <p style={{ margin: '0 0 0.75rem', color: 'var(--ink-soft)', fontSize: '0.88rem' }}>
+                  For <strong>many attempts at once</strong>, use <em>Batch grading</em> below: queue multiple <code>.xml</code> files against the same key.
+                </p>
+              </>
+            ) : (
+              <>
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem' }}>
+                  <div className="field">
+                    <label htmlFor="single-upload">Upload submission file (library types are saved for RAG)</label>
+                    <input
+                      id="single-upload"
+                      type="file"
+                      accept={PARSE_ACCEPT}
+                      onChange={(e) => void ingestSingleSubmissionFile(e.target.files)}
+                    />
+                  </div>
+                  <div className="field">
+                    <label>Or use library document</label>
+                    <DocList docs={docs} selectedIds={singleSubmissionDocIds} onChange={setSingleSubmissionDocIds} onDelete={(doc) => void deleteDoc(doc)} loading={docsLoading} />
+                  </div>
+                </div>
+                <div className="field">
+                  <label htmlFor="single-text">
+                    Submission text
+                    <span style={{ fontWeight: 400, color: 'var(--ink-soft)', fontSize: '0.82rem', marginLeft: '0.5rem' }}>
+                      — verify this matches what you uploaded. Edit if something looks wrong.
+                    </span>
+                  </label>
+                  <textarea
+                    id="single-text"
+                    rows={12}
+                    value={singleSubmissionText}
+                    onChange={(e) => setSingleSubmissionText(e.target.value)}
+                    placeholder="Paste or upload the student submission…"
+                    style={{ fontFamily: 'monospace', fontSize: '0.82rem' }}
+                  />
+                  {singleSubmissionText && (
+                    <p style={{ margin: '0.3rem 0 0', fontSize: '0.8rem', color: 'var(--ink-soft)' }}>
+                      {singleSubmissionText.length.toLocaleString()} characters · {singleSubmissionText.split('\n').length} lines
+                    </p>
+                  )}
+                </div>
+              </>
+            )}
             <div className="field">
               <label htmlFor="single-title">Result title</label>
               <input id="single-title" value={singleTitle} onChange={(e) => setSingleTitle(e.target.value)} />
             </div>
-            <div className="field">
-              <label htmlFor="single-text">
-                Submission text
-                <span style={{ fontWeight: 400, color: 'var(--ink-soft)', fontSize: '0.82rem', marginLeft: '0.5rem' }}>
-                  — verify this matches what you uploaded. Edit if something looks wrong.
-                </span>
-              </label>
-              <textarea
-                id="single-text"
-                rows={12}
-                value={singleSubmissionText}
-                onChange={(e) => setSingleSubmissionText(e.target.value)}
-                placeholder="Paste or upload the student submission…"
-                style={{ fontFamily: 'monospace', fontSize: '0.82rem' }}
-              />
-              {singleSubmissionText && (
-                <p style={{ margin: '0.3rem 0 0', fontSize: '0.8rem', color: 'var(--ink-soft)' }}>
-                  {singleSubmissionText.length.toLocaleString()} characters · {singleSubmissionText.split('\n').length} lines
-                </p>
-              )}
-            </div>
             <button type="button" className="btn btn--primary" disabled={loading} onClick={() => void gradeSingleSubmission()}>
-              {loading ? 'Grading…' : 'Grade single submission'}
+              {loading ? 'Grading…' : gradeSource === 'mcq' ? 'Grade Moodle MCQ' : 'Grade single submission'}
             </button>
           </div>
 
@@ -1803,54 +2266,118 @@ export function GradePage() {
           {/* Batch grading */}
           <div className="panel" style={{ marginBottom: '1rem' }}>
             <h2 style={{ margin: '0 0 0.5rem', fontSize: '1.08rem' }}>Batch grading</h2>
-            <p style={{ margin: '0 0 0.85rem', color: 'var(--ink-soft)', fontSize: '0.9rem' }}>
-              Upload multiple submission files and grade them all at once.
-            </p>
-            <div className="field">
-              <label htmlFor="batch-name">Batch name</label>
-              <input
-                id="batch-name"
-                value={batchName}
-                onChange={(e) => setBatchName(e.target.value)}
-                placeholder="Midterm Section A - April 26"
-              />
-            </div>
-            <div className="field">
-              <label htmlFor="batch-upload">Add submission files</label>
-              <input
-                id="batch-upload"
-                ref={batchInputRef}
-                type="file"
-                multiple
-                accept={PARSE_ACCEPT}
-                onChange={(e) => addBatchFiles(e.target.files)}
-              />
-            </div>
-
-            <div style={{ display: 'flex', gap: '0.65rem', alignItems: 'center', flexWrap: 'wrap', marginBottom: '0.5rem' }}>
-              <span className={`pill ${batchFiles.length > 0 ? 'pill--ok' : 'pill--warn'}`}>
-                {batchFiles.length} file(s) queued
-              </span>
-              {batchFiles.length > 0 && (
-                <button
-                  type="button"
-                  className="btn btn--ghost"
-                  style={{ fontSize: '0.82rem', padding: '0.2rem 0.6rem' }}
-                  onClick={() => setBatchFiles([])}
-                >
-                  Clear all
+            {gradeSource === 'mcq' ? (
+              <>
+                <p style={{ margin: '0 0 0.85rem', color: 'var(--ink-soft)', fontSize: '0.9rem' }}>
+                  Upload multiple student Moodle <code>.xml</code> exports. Each file is graded against the same answer key from the <strong>MCQ (Moodle)</strong> tab.
+                </p>
+                <div className="field">
+                  <label htmlFor="batch-name-mcq">Batch name</label>
+                  <input
+                    id="batch-name-mcq"
+                    value={batchName}
+                    onChange={(e) => setBatchName(e.target.value)}
+                    placeholder="Section A Moodle attempts"
+                  />
+                </div>
+                <div className="field">
+                  <label htmlFor="mcq-batch-upload">Add student attempt XML files</label>
+                  <input
+                    id="mcq-batch-upload"
+                    ref={mcqBatchInputRef}
+                    type="file"
+                    multiple
+                    accept={MOODLE_XML_ACCEPT}
+                    onChange={(e) => void addMcqBatchStudentXmlFiles(e.target.files)}
+                  />
+                </div>
+                <div style={{ display: 'flex', gap: '0.65rem', alignItems: 'center', flexWrap: 'wrap', marginBottom: '0.5rem' }}>
+                  <span className={`pill ${mcqBatchStudentXmls.length > 0 ? 'pill--ok' : 'pill--warn'}`}>
+                    {mcqBatchStudentXmls.length} attempt(s) queued
+                  </span>
+                  {mcqBatchStudentXmls.length > 0 && (
+                    <button
+                      type="button"
+                      className="btn btn--ghost"
+                      style={{ fontSize: '0.82rem', padding: '0.2rem 0.6rem' }}
+                      onClick={() => setMcqBatchStudentXmls([])}
+                    >
+                      Clear queue
+                    </button>
+                  )}
+                  {batchResults.length > 0 && <span className="pill pill--ok">{batchResults.length} result(s)</span>}
+                </div>
+                {mcqBatchStudentXmls.length > 0 && (
+                  <ul style={{ margin: '0 0 0.75rem', paddingLeft: '1.1rem', fontSize: '0.88rem', color: 'var(--ink-soft)' }}>
+                    {mcqBatchStudentXmls.map((row, i) => (
+                      <li key={`${row.title}-${i}`} style={{ marginBottom: '0.25rem' }}>
+                        <span style={{ color: 'var(--ink)' }}>{row.title}</span>
+                        {' · '}
+                        {row.xml.length.toLocaleString()} chars
+                        {' '}
+                        <button type="button" className="btn btn--ghost" style={{ fontSize: '0.75rem', padding: '0.1rem 0.45rem' }} onClick={() => removeMcqBatchStudent(i)}>
+                          Remove
+                        </button>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+                <button type="button" className="btn btn--primary" disabled={loading} onClick={() => void gradeBatchMcq()}>
+                  {loading ? 'Grading…' : 'Grade all Moodle MCQ attempts'}
                 </button>
-              )}
-              {batchResults.length > 0 && <span className="pill pill--ok">{batchResults.length} result(s)</span>}
-            </div>
+              </>
+            ) : (
+              <>
+                <p style={{ margin: '0 0 0.85rem', color: 'var(--ink-soft)', fontSize: '0.9rem' }}>
+                  Upload multiple submission files and grade them all at once (parsed to text).
+                </p>
+                <div className="field">
+                  <label htmlFor="batch-name">Batch name</label>
+                  <input
+                    id="batch-name"
+                    value={batchName}
+                    onChange={(e) => setBatchName(e.target.value)}
+                    placeholder="Midterm Section A - April 26"
+                  />
+                </div>
+                <div className="field">
+                  <label htmlFor="batch-upload">Add submission files</label>
+                  <input
+                    id="batch-upload"
+                    ref={batchInputRef}
+                    type="file"
+                    multiple
+                    accept={PARSE_ACCEPT}
+                    onChange={(e) => addBatchFiles(e.target.files)}
+                  />
+                </div>
 
-            <FileChips files={batchFiles} onRemove={removeBatchFile} />
+                <div style={{ display: 'flex', gap: '0.65rem', alignItems: 'center', flexWrap: 'wrap', marginBottom: '0.5rem' }}>
+                  <span className={`pill ${batchFiles.length > 0 ? 'pill--ok' : 'pill--warn'}`}>
+                    {batchFiles.length} file(s) queued
+                  </span>
+                  {batchFiles.length > 0 && (
+                    <button
+                      type="button"
+                      className="btn btn--ghost"
+                      style={{ fontSize: '0.82rem', padding: '0.2rem 0.6rem' }}
+                      onClick={() => setBatchFiles([])}
+                    >
+                      Clear all
+                    </button>
+                  )}
+                  {batchResults.length > 0 && <span className="pill pill--ok">{batchResults.length} result(s)</span>}
+                </div>
 
-            <div style={{ marginTop: '0.85rem' }}>
-              <button type="button" className="btn btn--primary" disabled={loading} onClick={() => void gradeBatchSubmissions()}>
-                {loading ? 'Grading…' : 'Grade batch submissions'}
-              </button>
-            </div>
+                <FileChips files={batchFiles} onRemove={removeBatchFile} />
+
+                <div style={{ marginTop: '0.85rem' }}>
+                  <button type="button" className="btn btn--primary" disabled={loading} onClick={() => void gradeBatchSubmissions()}>
+                    {loading ? 'Grading…' : 'Grade batch submissions'}
+                  </button>
+                </div>
+              </>
+            )}
           </div>
 
           {batchResults.length > 0 && (
@@ -1908,10 +2435,11 @@ export function GradePage() {
               <select
                 id="preset-source"
                 value={presetSource}
-                onChange={(e) => setPresetSource(e.target.value as 'assignment' | 'teacher_key')}
+                onChange={(e) => setPresetSource(e.target.value as 'assignment' | 'qa' | 'mcq')}
               >
                 <option value="assignment">Assignment rubric</option>
-                <option value="teacher_key">Teacher-key rubric</option>
+                <option value="qa">QA rubric</option>
+                <option value="mcq">MCQ (Moodle) rubric</option>
               </select>
             </div>
             <div className="field">
@@ -1941,7 +2469,7 @@ export function GradePage() {
                   <div>
                     <strong>{name}</strong>
                     <div style={{ color: 'var(--ink-soft)', fontSize: '0.88rem' }}>
-                      {(preset.origin || 'assignment') === 'teacher_key' ? 'Teacher-key' : 'Assignment'} · {preset.items?.length || 0} items · {preset.total_points} pts
+                      {presetOriginLabel(preset.origin)} · {preset.items?.length || 0} items · {preset.total_points} pts
                     </div>
                   </div>
                   <div style={{ display: 'flex', gap: '0.5rem' }}>
