@@ -1,0 +1,180 @@
+import { useCallback, useEffect, useState } from 'react'
+import { apiJson, apiUpload } from '../api/client'
+
+type LocalDoc = {
+  document_id: string
+  title: string
+  path: string
+  filetype: string
+}
+
+type RAGStatus = {
+  indexed_chunks?: number
+  chunking?: { chunk_size: number; chunk_overlap: number }
+}
+
+export function LibraryPage() {
+  const [docs, setDocs] = useState<LocalDoc[]>([])
+  const [loading, setLoading] = useState(false)
+  const [reindexing, setReindexing] = useState(false)
+  const [message, setMessage] = useState<string | null>(null)
+  const [error, setError] = useState<string | null>(null)
+  const [chunkSize, setChunkSize] = useState('')
+  const [chunkOverlap, setChunkOverlap] = useState('')
+
+  const loadRagStatus = useCallback(async () => {
+    try {
+      const s = await apiJson<RAGStatus>('/rag/status')
+      if (s.chunking) {
+        setChunkSize(String(s.chunking.chunk_size))
+        setChunkOverlap(String(s.chunking.chunk_overlap))
+      }
+    } catch {
+      /* optional */
+    }
+  }, [])
+
+  const refresh = useCallback(async () => {
+    setLoading(true)
+    setError(null)
+    try {
+      const list = await apiJson<LocalDoc[]>('/documents/local')
+      setDocs(list)
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Failed to list documents')
+    } finally {
+      setLoading(false)
+    }
+    void loadRagStatus()
+  }, [loadRagStatus])
+
+  useEffect(() => {
+    void refresh()
+  }, [refresh])
+
+  async function onUpload(e: React.ChangeEvent<HTMLInputElement>) {
+    const files = e.target.files
+    if (!files?.length) return
+    setError(null)
+    setMessage(null)
+    try {
+      await apiUpload('/documents/upload', files)
+      setMessage('Files stored in the knowledge base.')
+      await refresh()
+      e.target.value = ''
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Upload failed')
+    }
+  }
+
+  async function reindex() {
+    setReindexing(true)
+    setError(null)
+    setMessage(null)
+    try {
+      const body: Record<string, number> = {}
+      const cs = parseInt(chunkSize, 10)
+      const co = parseInt(chunkOverlap, 10)
+      if (Number.isFinite(cs) && cs >= 50) body.chunk_size = cs
+      if (Number.isFinite(co) && co >= 0) body.chunk_overlap = co
+      await apiJson('/rag/reindex', { method: 'POST', body: JSON.stringify(body) })
+      setMessage('Index rebuilt. Dialogue, chat, and RAG-based summarize use these chunk settings.')
+      await loadRagStatus()
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Reindex failed')
+    } finally {
+      setReindexing(false)
+    }
+  }
+
+  return (
+    <>
+      <h1 className="page-title">Library</h1>
+      <p className="page-sub">
+        Add PDF, DOCX, PPTX, or text files. Uploads here trigger a search index rebuild automatically; use the button if
+        you dropped files into data/knowledge_base manually or the shelf looks out of date.
+      </p>
+
+      {error && <div className="error" style={{ whiteSpace: 'pre-wrap' }}>{error}</div>}
+      {message && (
+        <div className="panel" style={{ marginBottom: '1rem', background: 'rgba(80,160,120,0.08)', borderColor: 'rgba(80,160,120,0.25)' }}>
+          {message}
+        </div>
+      )}
+
+      <div className="panel">
+        <div className="dropzone">
+          <strong>Add to shelf</strong>
+          <p style={{ margin: '0.5rem 0', color: 'var(--ink-soft)', fontSize: '0.92rem' }}>
+            Drag is browser-limited — use the file picker. Multiple files allowed.
+          </p>
+          <input type="file" multiple accept=".pdf,.docx,.pptx,.txt,.md,.json" onChange={onUpload} />
+        </div>
+        <div
+          style={{
+            display: 'grid',
+            gap: '0.75rem',
+            marginBottom: '0.75rem',
+            gridTemplateColumns: 'repeat(auto-fill, minmax(11rem, 1fr))',
+            maxWidth: '28rem',
+          }}
+        >
+          <div className="field" style={{ marginBottom: 0 }}>
+            <label htmlFor="chunk-size">Chunk size (chars)</label>
+            <input
+              id="chunk-size"
+              type="number"
+              min={50}
+              step={10}
+              value={chunkSize}
+              onChange={(e) => setChunkSize(e.target.value)}
+              placeholder="e.g. 900"
+            />
+          </div>
+          <div className="field" style={{ marginBottom: 0 }}>
+            <label htmlFor="chunk-overlap">Chunk overlap</label>
+            <input
+              id="chunk-overlap"
+              type="number"
+              min={0}
+              step={10}
+              value={chunkOverlap}
+              onChange={(e) => setChunkOverlap(e.target.value)}
+              placeholder="e.g. 150"
+            />
+          </div>
+        </div>
+        <p style={{ margin: '0 0 0.75rem', fontSize: '0.88rem', color: 'var(--ink-soft)' }}>
+          Values load from the server when available. Omit a field to leave that setting unchanged on reindex. Overlap
+          must be smaller than chunk size when both are sent.
+        </p>
+        <div style={{ display: 'flex', gap: '0.75rem', flexWrap: 'wrap', alignItems: 'center' }}>
+          <button type="button" className="btn btn--primary" disabled={reindexing} onClick={() => void reindex()}>
+            {reindexing ? 'Rebuilding index…' : 'Rebuild search index'}
+          </button>
+          <button type="button" className="btn btn--ghost" disabled={loading} onClick={() => void refresh()}>
+            Refresh list
+          </button>
+        </div>
+      </div>
+
+      <div className="panel" style={{ marginTop: '1.25rem' }}>
+        <h2 style={{ margin: '0 0 1rem', fontSize: '1.15rem' }}>On the shelf</h2>
+        {loading && <p style={{ color: 'var(--ink-soft)' }}>Loading…</p>}
+        {!loading && docs.length === 0 && (
+          <p style={{ color: 'var(--ink-soft)' }}>No documents yet. Upload above or place files in data/knowledge_base.</p>
+        )}
+        <ul className="doc-list">
+          {docs.map((d) => (
+            <li key={d.path || `${d.document_id}-${d.title}`}>
+              <span>
+                <strong>{d.title}</strong> <code>{d.document_id}</code>
+              </span>
+              <span style={{ color: 'var(--ink-soft)' }}>{d.filetype}</span>
+            </li>
+          ))}
+        </ul>
+      </div>
+    </>
+  )
+}
