@@ -1,140 +1,141 @@
 # Smart Teacher Assistant
 
-USJ capstone — FastAPI backend for document ingestion (PDF, DOCX, PPTX), structured extraction, RAG, LangGraph orchestration, content agents (summaries, slides, quizzes), chat, and evaluation (rubrics + grading).
+![Python](https://img.shields.io/badge/Python-3.10+-blue?logo=python)
+![FastAPI](https://img.shields.io/badge/FastAPI-backend-009688?logo=fastapi)
+![LangGraph](https://img.shields.io/badge/LangGraph-orchestration-1C3C3C)
+![RAG](https://img.shields.io/badge/RAG-FAISS%20%2B%20mpnet-orange)
+![React](https://img.shields.io/badge/React-Vite%20UI-61DAFB?logo=react)
 
-**Branches:** use **`dev`** for daily work; merge **`dev` → `main`** for submission releases.
+A multi-agent LLM platform that turns a teacher's course material into teaching resources. The teacher uploads PDFs, Word files or slide decks; the system parses and indexes them in a retrieval-augmented generation (RAG) pipeline, and a LangGraph workflow routes each request to a specialised agent: summaries, slides, quizzes, grading rubrics, automatic grading, and chat with the documents.
+
+Capstone project, Faculty of Engineering (ESIB), Université Saint-Joseph de Beyrouth, January – April 2026.
+
+---
+
+## What it does
+
+| Agent | Input | Output |
+|---|---|---|
+| Summarizer | One or more course documents | Structured summary (map-reduce over chunks for long documents) |
+| Quiz generator | Course document | MCQ, short-answer and true/false questions, exportable to Moodle XML |
+| Slide generator | Course document | Slide deck with generated visuals, exported to PPTX / PDF |
+| Rubric generator | Assignment description | Grading rubric with criteria and levels |
+| Grading agent | Student submission + rubric | Per-criterion scores and written feedback |
+| Chat with documents | Question | Answer grounded in the uploaded material, with cited sources (section, page) |
+| Cross-document analysis | Several documents | Comparison and links between ideas across documents |
+
+## Architecture
+
+```mermaid
+flowchart LR
+    U[Teacher<br/>React UI / Streamlit] --> API[FastAPI<br/>routers]
+    API --> DP[Document processing<br/>PDF · DOCX · PPTX · OCR]
+    DP --> RAG[(RAG index<br/>mpnet embeddings + FAISS)]
+    API --> G{LangGraph<br/>classify intent}
+    G --> D[Dialogue / chat]
+    G --> S[Summarize]
+    G --> SL[Slides]
+    G --> Q[Quiz]
+    G --> GR[Grade]
+    D & S & SL & Q & GR --> RAG
+    D & S & SL & Q & GR --> LLM[LLM<br/>Llama 3.3 70B via Groq]
+```
+
+A single entry point, `POST /graph/invoke`, runs the whole workflow. With `intent: "auto"`, the first node asks the LLM to classify the request, then a conditional edge routes it to the matching agent node. Each agent retrieves the relevant chunks from the RAG index before calling the LLM, so answers are based on the teacher's own documents.
+
+The main parts:
+
+- Document processing: loaders and parsers for PDF, DOCX and PPTX, text cleaning, structure and table extraction, OCR for scanned pages (Tesseract), Arabic text support.
+- RAG: chunking, `sentence-transformers/all-mpnet-base-v2` embeddings, FAISS inner-product index, retrieval with source metadata.
+- Orchestration: LangGraph `StateGraph` (`app/services/agents/orchestration/assistant_graph.py`) with a shared typed state across nodes.
+- Evaluation: dynamic rubric generation, rubric-based grading, feedback and analytics.
+- API: FastAPI routers per module (`documents`, `rag`, `chat`, `agents`, `evaluation`, `graph`, `generate_slides`), OpenAPI docs at `/docs`.
+- UI: React + TypeScript (Vite) app with Library, Dialogue, Summarize, Slides, Quiz and Grading pages; a Streamlit UI is also available.
+
+## Team
+
+| Member | Ownership |
+|---|---|
+| Jean Mardini | Technical lead: repository and architecture, LangGraph orchestration, global configuration, FastAPI layer, integration of all modules |
+| Angela Nabhan | Summarizer, quiz and slide agents |
+| Kristy Tannoury | Rubric and grading agents, evaluation logic |
+| Marc Khattar | RAG pipeline, chat and cross-document agents |
+| Matheos Touma | Document processing |
+
+## Tech stack
+
+Python · FastAPI · LangGraph / LangChain Core · Groq (Llama 3.3 70B) · sentence-transformers · FAISS · Hugging Face Transformers · pdfplumber / PyMuPDF / python-docx / python-pptx · Tesseract OCR · Playwright (slide export) · React + TypeScript (Vite) · Streamlit
 
 ---
 
 ## Running locally
 
-**Requirements:** Python **3.10+**, **Node.js** (for the Atelier UI). For scanned PDFs, install [Tesseract OCR](https://github.com/UB-Mannheim/tesseract/wiki) and put it on `PATH`.
+Requirements: Python 3.10+, Node.js (for the web UI), a [Groq API key](https://console.groq.com). For scanned PDFs, install [Tesseract OCR](https://github.com/UB-Mannheim/tesseract/wiki) and add it to `PATH`.
 
-### One-time setup (project root)
+### 1. Backend
 
-**Windows (PowerShell)** — from the folder that contains `app/` and `requirements.txt`:
-
-```powershell
+```bash
+git clone https://github.com/Jean-Mardini/Smart-Teacher-Assistant.git
+cd Smart-Teacher-Assistant
 python -m venv .venv
-.\.venv\Scripts\Activate.ps1
+source .venv/bin/activate          # Windows: .\.venv\Scripts\Activate.ps1
 pip install -r requirements.txt
-Copy-Item .env.example .env
-# Edit .env: at minimum set GROQ_API_KEY; optional HF_TOKEN / XAI_API_KEY / OPENAI_API_KEY for slide images
-```
-
-**macOS / Linux (bash)** — same folder:
-
-```bash
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-cp .env.example .env
-# Edit .env (GROQ_API_KEY, etc.)
-```
-
-### Terminal A — FastAPI backend
-
-Run from the **repository root** (where `app/main.py` lives), with the venv **activated**:
-
-**Windows**
-
-```powershell
-cd C:\path\to\Smart-Teacher-Assistant
-.\.venv\Scripts\Activate.ps1
+cp .env.example .env               # then set GROQ_API_KEY (optional: HF_TOKEN, OPENAI_API_KEY for slide images)
 python -m uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
 ```
-
-**macOS / Linux**
-
-```bash
-cd /path/to/Smart-Teacher-Assistant
-source .venv/bin/activate
-python -m uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
-```
-
-Leave this terminal open. Quick checks:
 
 | URL | Purpose |
-|-----|---------|
+|---|---|
 | http://127.0.0.1:8000/docs | OpenAPI / Swagger |
 | http://127.0.0.1:8000/health | Health check |
-| http://127.0.0.1:8000/evaluation/status | Evaluation module flags (Kristy) |
-| http://127.0.0.1:8000/graph/info | LangGraph orchestration (nodes) |
-| http://127.0.0.1:8000/graph/invoke | **Unified teaching workflow** (classify → dialogue / summarize / slides / quiz / grade) |
+| http://127.0.0.1:8000/graph/info | LangGraph nodes |
+| `POST /graph/invoke` | Unified workflow (classify → dialogue / summarize / slides / quiz / grade) |
 
-`POST /chat` runs the same graph with `intent=dialogue` (RAG + Groq). Prefer `POST /graph/invoke` with `intent: auto` to let the model route the request, or set a fixed intent and supply `document_id`, `rubric_items`, etc.
+### 2. Web UI
 
-CORS allows local frontends on ports **5173**, **3000**, **8501** (Vite / React / Streamlit). If you use another Vite port, ensure the backend CORS settings include it or use the default ports.
-
-### Terminal B — Atelier (Vite frontend)
-
-```powershell
-cd C:\path\to\Smart-Teacher-Assistant\frontend
+```bash
+cd frontend
 npm install
-npm run dev
+npm run dev                        # opens on http://127.0.0.1:5173
 ```
 
-Open the URL Vite prints (often **http://127.0.0.1:5173**). The UI calls the API at **`VITE_API_URL`** (defaults to `http://127.0.0.1:8000`).
+The UI calls the API at `VITE_API_URL` (default `http://127.0.0.1:8000`). To change it, copy `frontend/.env.example` to `frontend/.env.local` and restart `npm run dev`.
 
-If the backend uses a **different host or port**, create `frontend/.env.local`:
+### Optional: Streamlit UI
 
 ```bash
-# copy from example, then edit if needed
-cp .env.example .env.local   # macOS / Linux
+streamlit run streamlit_app.py     # http://127.0.0.1:8501
 ```
 
-```powershell
-Copy-Item .env.example .env.local   # Windows
-```
-
-Set `VITE_API_URL` to match Uvicorn (no trailing slash), then **restart** `npm run dev`.
-
-The sidebar has **Library**, **Dialogue**, **Summarize**, **Slides**, **Quiz**, and **Grading**. If you see a connection error, confirm Terminal A is running and `VITE_API_URL` matches the API.
-
-### Optional — Streamlit (second UI)
-
-From the **repository root**, venv activated:
-
-```powershell
-streamlit run streamlit_app.py
-```
-
-Default Streamlit URL: **http://127.0.0.1:8501** (ensure the Streamlit origin is allowed by CORS if you call the API from it).
-
----
-
-## Document processing (Matheos)
-
-**Entry points:** `process_document(filepath)` or `parse_document(path)` from `app/services/document_processing`.
-
-**Demo (local files in `samples/`):**
+### Document processing demo
 
 ```bash
-python demo_document_processing.py
+python demo_document_processing.py # parses the files in samples/, writes JSON to outputs/json/
 ```
 
-Outputs JSON under `outputs/json/` and images under `outputs/images/`.
-
-**Pipeline flow:** loaders → pdf/docx/pptx parsers → cleaners → structure extraction + tables → `ParsedDocument` (see Matheos section in repo for PDF/OCR/Arabic details).
-
 ---
 
-## Layout
+## Project structure
 
-| Area | Path |
-|------|------|
-| Web UI (Atelier) | `frontend/` |
-| API routers | `app/api/routers/` |
-| Models | `app/models/` |
-| Document processing | `app/services/document_processing/` |
-| RAG / knowledge | `app/services/knowledge/` |
-| Agents | `app/services/agents/` |
-| LangGraph orchestration | `app/services/agents/orchestration/` (`assistant_graph.py`) |
-| Evaluation | `app/services/evaluation/` |
-| Orchestration (optional) | `app/services/agents/orchestration/` |
-
----
-
-## Team integration order
-
-Matheos (documents) → Mark (RAG) → Kristy (evaluation, can be merged manually) → Mike (frontend).
+```text
+Smart-Teacher-Assistant/
+├── app/
+│   ├── main.py                        # FastAPI app, CORS, router registration
+│   ├── core/config.py                 # global configuration
+│   ├── api/routers/                   # documents, rag, chat, agents, evaluation, graph, slides
+│   ├── models/                        # Pydantic request/response models
+│   ├── prompts/                       # prompt templates (summaries, quiz, slides)
+│   ├── services/
+│   │   ├── document_processing/       # loaders, parsers, OCR, structure extraction
+│   │   ├── rag/                       # chunker, embeddings, FAISS store, retriever
+│   │   ├── knowledge/                 # chunking config, embeddings
+│   │   ├── agents/                    # summarizer, quiz, slides, rubric, grading, chat, cross-doc
+│   │   │   └── orchestration/         # LangGraph teaching workflow
+│   │   ├── evaluation/                # rubrics, grading, feedback, analytics
+│   │   └── llm/                       # Groq client
+│   └── storage/                       # file and database storage
+├── frontend/                          # React + TypeScript (Vite) UI
+├── streamlit_app.py                   # alternative UI
+├── scripts/                           # smoke tests
+└── requirements.txt
+```
