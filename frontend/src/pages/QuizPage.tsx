@@ -248,8 +248,8 @@ export function QuizPage() {
 
   /** Sends quiz questions as a QA-style rubric into Flexible Grader (Grade tab). */
   function exportQuizRubricToGrading() {
-    const list = result?.quiz
-    if (!list?.length) return
+    if (!result?.quiz?.length) return
+    const list = result.quiz
     const rubric = quizQuestionsToRubricItems(list)
     const teacherKeyText = buildTeacherKeyFromQuiz(list, result.quiz_title)
     const sumPts = rubricPointsSum(rubric)

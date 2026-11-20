@@ -133,8 +133,6 @@ type HistoryBatch = {
 }
 type HistoryResponse = { records?: EvaluationResult[]; batches?: HistoryBatch[]; stats?: HistoryStats }
 
-/** Extensions the API stores in the knowledge base for RAG (must match server ``ALLOWED_EXTENSIONS``). */
-const LIBRARY_ACCEPT = '.pdf,.docx,.pptx,.txt,.md,.json'
 const PARSE_ACCEPT = '.pdf,.docx,.pptx,.txt,.md,.json,.csv,.html,.rtf,.zip'
 const MOODLE_XML_ACCEPT = '.xml'
 
