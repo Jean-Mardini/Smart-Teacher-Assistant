@@ -8,7 +8,7 @@
 
 A multi-agent LLM platform that turns a teacher's course material into teaching resources. The teacher uploads PDFs, Word files or slide decks; the system parses and indexes them in a retrieval-augmented generation (RAG) pipeline, and a LangGraph workflow routes each request to a specialised agent: summaries, slides, quizzes, grading rubrics, automatic grading, and chat with the documents.
 
-Capstone project, Faculty of Engineering (ESIB), Université Saint-Joseph de Beyrouth, January – April 2026.
+Built at the Faculty of Engineering (ESIB), Université Saint-Joseph de Beyrouth, January–April 2026.
 
 ---
 
@@ -30,6 +30,7 @@ Capstone project, Faculty of Engineering (ESIB), Université Saint-Joseph de Bey
 flowchart LR
     U[Teacher<br/>React UI / Streamlit] --> API[FastAPI<br/>routers]
     API --> DP[Document processing<br/>PDF · DOCX · PPTX · OCR]
+    DP --> LIB[(Parsed documents)]
     DP --> RAG[(RAG index<br/>mpnet embeddings + FAISS)]
     API --> G{LangGraph<br/>classify intent}
     G --> D[Dialogue / chat]
@@ -37,11 +38,12 @@ flowchart LR
     G --> SL[Slides]
     G --> Q[Quiz]
     G --> GR[Grade]
-    D & S & SL & Q & GR --> RAG
+    D --> RAG
+    S & SL & Q --> LIB
     D & S & SL & Q & GR --> LLM[LLM<br/>Llama 3.3 70B via Groq]
 ```
 
-A single entry point, `POST /graph/invoke`, runs the whole workflow. With `intent: "auto"`, the first node asks the LLM to classify the request, then a conditional edge routes it to the matching agent node. Each agent retrieves the relevant chunks from the RAG index before calling the LLM, so answers are based on the teacher's own documents.
+A single entry point, `POST /graph/invoke`, runs the whole workflow. With `intent: "auto"`, the first node asks the LLM to classify the request, then a conditional edge routes it to the matching agent node. The chat node answers from chunks retrieved in the RAG index, with sources. The summary, slide and quiz nodes work on the parsed documents the teacher selects, and the grading node scores a submission against a rubric.
 
 The main parts:
 
